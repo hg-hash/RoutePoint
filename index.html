@@ -729,7 +729,7 @@ function OngoingDeliveriesTable({ deliveries, onSelect }) {
   );
 }
 
-function LabelStatusBadge({ routePoint }) {
+function LabelStatusBadge({ routePoint, onPrintLabel, printing }) {
   if (routePoint && routePoint.labelGenerated) {
     return (
       <div>
@@ -745,9 +745,22 @@ function LabelStatusBadge({ routePoint }) {
     );
   }
   return (
-    <span className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-amber-100 text-amber-800 whitespace-nowrap">
-      Needs label
-    </span>
+    <div>
+      <span className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-amber-100 text-amber-800 whitespace-nowrap">
+        Needs label
+      </span>
+      <button
+        onClick={onPrintLabel}
+        disabled={printing}
+        title="Australia Post label creation isn't connected yet"
+        className={
+          "block mt-1.5 text-xs font-semibold whitespace-nowrap " +
+          (printing ? "text-slate-400 cursor-not-allowed" : "text-blue-600 hover:underline")
+        }
+      >
+        {printing ? "Printing…" : "Print Label"}
+      </button>
+    </div>
   );
 }
 
@@ -755,6 +768,7 @@ function StorbieOrdersScreen() {
   const [orders, setOrders] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [printingRef, setPrintingRef] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -774,6 +788,33 @@ function StorbieOrdersScreen() {
       });
     return () => { cancelled = true; };
   }, []);
+
+  async function handlePrintLabel(order) {
+    setError(null);
+    setPrintingRef(order.orderRef);
+    try {
+      const response = await fetch(`${API_BASE}/storbie/orders/${encodeURIComponent(order.orderRef)}/create-label`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          customerName: order.customerName,
+          customerPhone: order.customerPhone,
+          address: order.address,
+          items: order.items,
+        }),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setError(body.message || "Could not create a label for this order right now.");
+        return;
+      }
+      setOrders(prev => prev.map(o => (o.orderRef === order.orderRef ? { ...o, routePoint: body.routePoint } : o)));
+    } catch {
+      setError("Could not reach the delivery server. Please check it's running and try again.");
+    } finally {
+      setPrintingRef(null);
+    }
+  }
 
   const sortedOrders = useMemo(() => {
     if (!orders) return orders;
@@ -829,7 +870,13 @@ function StorbieOrdersScreen() {
               {!loading && sortedOrders && sortedOrders.map(o => (
                 <tr key={o.orderRef}>
                   <td className="px-5 py-4 font-semibold text-slate-900">{o.orderRef}</td>
-                  <td className="px-5 py-4"><LabelStatusBadge routePoint={o.routePoint} /></td>
+                  <td className="px-5 py-4">
+                    <LabelStatusBadge
+                      routePoint={o.routePoint}
+                      printing={printingRef === o.orderRef}
+                      onPrintLabel={() => handlePrintLabel(o)}
+                    />
+                  </td>
                   <td className="px-5 py-4 text-slate-700">{o.customerName || "—"}</td>
                   <td className="px-5 py-4 text-slate-700">{o.customerPhone || "—"}</td>
                   <td className="px-5 py-4 text-slate-500">{o.address || "—"}</td>

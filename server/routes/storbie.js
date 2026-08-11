@@ -1,5 +1,6 @@
 const express = require("express");
 const storbie = require("../integrations/storbie");
+const auspost = require("../providers/auspost");
 const actionStore = require("../storbieActionStore");
 const { respondWithProviderError } = require("./respondWithProviderError");
 
@@ -40,6 +41,27 @@ router.post("/orders/:orderRef/mark-actioned", (req, res) => {
 
   const record = actionStore.markActioned(orderRef, { trackingNumber, carrier });
   res.json({ orderRef, routePoint: record });
+});
+
+// POST /api/storbie/orders/:orderRef/create-label — { customerName, customerPhone,
+// address, items }. Will create a real Australia Post label once MyPost
+// Business API access is confirmed (see providers/auspost.js — currently a
+// stub). On success, automatically marks the order actioned; on failure
+// (always, for now) nothing is marked, and the frontend sees a clean error.
+router.post("/orders/:orderRef/create-label", async (req, res) => {
+  const { orderRef } = req.params;
+  const { customerName, customerPhone, address, items } = req.body || {};
+
+  try {
+    const label = await auspost.createLabel({ orderRef, customerName, customerPhone, address, items });
+    const record = actionStore.markActioned(orderRef, {
+      trackingNumber: label.trackingNumber,
+      carrier: "Australia Post",
+    });
+    res.json({ orderRef, label, routePoint: record });
+  } catch (err) {
+    respondWithProviderError(res, err, "Could not create a label for this order right now.");
+  }
 });
 
 module.exports = router;
