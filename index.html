@@ -73,10 +73,6 @@ function daysAgoIso(days, hours) {
   return new Date(Date.now() - days * 24 * 60 * 60000 - (hours || 0) * 60 * 60000).toISOString();
 }
 
-function genId() {
-  return "DEL-" + Math.random().toString(36).slice(2, 8).toUpperCase();
-}
-
 function minutesFromNow(mins) {
   return new Date(Date.now() + mins * 60000).toISOString();
 }
@@ -90,15 +86,35 @@ function formatMoney(fee, currency) {
   return new Intl.NumberFormat("en-AU", { style: "currency", currency: currency || "AUD" }).format(fee);
 }
 
-function mockQuote() {
-  const fee = Math.round((Math.random() * (16.5 - 8.9) + 8.9) * 100) / 100;
-  const etaMinutes = Math.floor(Math.random() * (45 - 25 + 1)) + 25;
-  return {
-    fee,
-    currency: "AUD",
-    dropoffEta: minutesFromNow(etaMinutes),
-    quoteExpiresAt: minutesFromNow(5),
-  };
+const API_BASE = "http://localhost:4000/api";
+
+// Uber's status vocabulary (pending/pickup/pickup_complete/dropoff/delivered/canceled)
+// gets mapped onto the app's existing simplified status keys so StatusBadge,
+// StatusTimeline, and the ongoing/history filters all keep working unchanged.
+const PROVIDER_STATUS_MAP = {
+  pending: "booked",
+  pickup: "courier_assigned",
+  pickup_complete: "picked_up",
+  dropoff: "picked_up",
+  delivered: "delivered",
+  canceled: "cancelled",
+  cancelled: "cancelled",
+};
+
+function normalizeProviderStatus(status) {
+  return PROVIDER_STATUS_MAP[status] || status;
+}
+
+function mapDeliveryRecord(record) {
+  return { ...record, status: normalizeProviderStatus(record.status) };
+}
+
+async function parseJsonResponse(response) {
+  try {
+    return await response.json();
+  } catch {
+    return {};
+  }
 }
 
 function seedDeliveries() {
@@ -229,6 +245,7 @@ const NAV_ITEMS = [
   { key: "history", label: "Delivery History" },
   { key: "customers", label: "Customers" },
   { key: "reports", label: "Reports" },
+  { key: "storbie", label: "Storbie Orders (checkpoint)" },
 ];
 
 function Sidebar({ activeSection, onNavigate, onNewDelivery, activeCount, mobileOpen, onCloseMobile }) {
@@ -324,7 +341,7 @@ function useCountdown(targetIso) {
   return Math.max(0, Math.floor(remainingMs / 1000));
 }
 
-function QuoteCard({ quote, onBook, expired }) {
+function QuoteCard({ quote, onBook, bookLoading }) {
   const secs = useCountdown(quote.quoteExpiresAt);
   const mm = String(Math.floor((secs || 0) / 60)).padStart(2, "0");
   const ss = String((secs || 0) % 60).padStart(2, "0");
@@ -350,13 +367,13 @@ function QuoteCard({ quote, onBook, expired }) {
       </div>
       <button
         onClick={onBook}
-        disabled={isExpired}
+        disabled={isExpired || bookLoading}
         className={
           "mt-6 w-full py-4 rounded-xl font-bold text-lg transition-colors " +
-          (isExpired ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800")
+          (isExpired || bookLoading ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800")
         }
       >
-        {isExpired ? "Quote expired — get a new one" : "Book Delivery"}
+        {isExpired ? "Quote expired — get a new one" : bookLoading ? "Booking…" : "Book Delivery"}
       </button>
     </div>
   );
@@ -381,6 +398,9 @@ function NewDeliveryForm({ customers, onBookDelivery, banner }) {
   const [form, setForm] = useState(emptyDeliveryForm);
   const [errors, setErrors] = useState({});
   const [quote, setQuote] = useState(null);
+  const [apiError, setApiError] = useState(null);
+  const [quoteLoading, setQuoteLoading] = useState(false);
+  const [bookLoading, setBookLoading] = useState(false);
 
   function update(field, value) {
     setForm(f => ({ ...f, [field]: value }));
@@ -423,45 +443,82 @@ function NewDeliveryForm({ customers, onBookDelivery, banner }) {
     return Object.keys(errs).length === 0;
   }
 
-  function handleGetQuote() {
+  async function handleGetQuote() {
     if (!validate()) return;
-    setQuote(mockQuote());
+    setApiError(null);
+    setQuoteLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/quote`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pickupAddress: form.pickupAddress.trim(),
+          dropoffAddress: form.dropoffAddress.trim(),
+          packageNotes: form.packageNotes.trim(),
+          coldChain: form.coldChain,
+        }),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setApiError(body.message || "Could not get a delivery quote right now, please try again.");
+        return;
+      }
+      setQuote(body);
+    } catch {
+      setApiError("Could not reach the delivery server. Please check it's running and try again.");
+    } finally {
+      setQuoteLoading(false);
+    }
   }
 
-  function handleBook() {
+  async function handleBook() {
     if (!quote) return;
-    const delivery = {
-      id: genId(),
-      orderRef: form.orderRef.trim(),
-      customerName: form.customerName.trim(),
-      customerPhone: form.customerPhone.trim(),
-      customerId: form.selectedCustomerId,
-      pickupAddress: form.pickupAddress.trim(),
-      dropoffAddress: form.dropoffAddress.trim(),
-      status: "booked",
-      fee: quote.fee,
-      currency: quote.currency,
-      quoteExpiresAt: null,
-      dropoffEta: quote.dropoffEta,
-      courierName: null,
-      courierPhone: null,
-      trackingUrl: null,
-      packageNotes: form.packageNotes.trim(),
-      coldChain: form.coldChain,
-      createdAt: new Date().toISOString(),
-    };
-    onBookDelivery(delivery, {
-      saveNewCustomer: !form.selectedCustomerId && form.saveCustomer,
-      newCustomerData: {
-        name: delivery.customerName,
-        phone: delivery.customerPhone,
-        address: delivery.dropoffAddress,
-        notes: "",
-      },
-    });
-    setForm(emptyDeliveryForm());
-    setQuote(null);
-    setErrors({});
+    setApiError(null);
+    setBookLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/deliveries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          quoteId: quote.quoteId,
+          orderRef: form.orderRef.trim(),
+          customerName: form.customerName.trim(),
+          customerPhone: form.customerPhone.trim(),
+          customerId: form.selectedCustomerId,
+          pickupAddress: form.pickupAddress.trim(),
+          dropoffAddress: form.dropoffAddress.trim(),
+          packageNotes: form.packageNotes.trim(),
+          coldChain: form.coldChain,
+        }),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        if (body.error === "QUOTE_EXPIRED") {
+          setApiError("This quote has expired — please get a new quote before booking.");
+          setQuote(null);
+        } else {
+          setApiError(body.message || "Could not book this delivery right now, please try again.");
+        }
+        return;
+      }
+      const delivery = mapDeliveryRecord(body);
+      onBookDelivery(delivery, {
+        saveNewCustomer: !form.selectedCustomerId && form.saveCustomer,
+        newCustomerData: {
+          name: delivery.customerName,
+          phone: delivery.customerPhone,
+          address: delivery.dropoffAddress,
+          notes: "",
+        },
+      });
+      setForm(emptyDeliveryForm());
+      setQuote(null);
+      setErrors({});
+    } catch {
+      setApiError("Could not reach the delivery server. Please check it's running and try again.");
+    } finally {
+      setBookLoading(false);
+    }
   }
 
   return (
@@ -469,6 +526,11 @@ function NewDeliveryForm({ customers, onBookDelivery, banner }) {
       {banner && (
         <div className="mb-6 bg-green-50 border border-green-300 text-green-800 rounded-xl px-5 py-4 font-semibold">
           {banner}
+        </div>
+      )}
+      {apiError && (
+        <div className="mb-6 bg-red-50 border border-red-300 text-red-800 rounded-xl px-5 py-4 font-semibold">
+          {apiError}
         </div>
       )}
       <h1 className="text-2xl font-bold text-slate-900 mb-6">New Delivery</h1>
@@ -593,16 +655,20 @@ function NewDeliveryForm({ customers, onBookDelivery, banner }) {
           <div className="pt-2">
             <button
               onClick={handleGetQuote}
-              className="w-full sm:w-auto px-8 py-4 rounded-xl font-bold text-lg bg-slate-900 text-white hover:bg-slate-800 active:bg-black transition-colors"
+              disabled={quoteLoading}
+              className={
+                "w-full sm:w-auto px-8 py-4 rounded-xl font-bold text-lg transition-colors " +
+                (quoteLoading ? "bg-slate-300 text-slate-500 cursor-not-allowed" : "bg-slate-900 text-white hover:bg-slate-800 active:bg-black")
+              }
             >
-              Get Quote
+              {quoteLoading ? "Getting quote…" : "Get Quote"}
             </button>
           </div>
         </div>
 
         <div>
           {quote ? (
-            <QuoteCard quote={quote} onBook={handleBook} />
+            <QuoteCard quote={quote} onBook={handleBook} bookLoading={bookLoading} />
           ) : (
             <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center text-slate-400 sticky top-24">
               <p className="font-medium">Fill in the form and tap "Get Quote" to see the fee and ETA here.</p>
@@ -653,6 +719,91 @@ function OngoingDeliveriesTable({ deliveries, onSelect }) {
                   <td className="px-5 py-4"><StatusBadge status={d.status} /></td>
                   <td className="px-5 py-4 text-slate-700">{d.status === "cancelled" ? "—" : formatTime(d.dropoffEta)}</td>
                   <td className="px-5 py-4 text-slate-700">{d.courierName || "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StorbieOrdersScreen() {
+  const [orders, setOrders] = useState(null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    fetch(`${API_BASE}/storbie/orders?pageSize=25`)
+      .then(async response => {
+        const body = await parseJsonResponse(response);
+        if (!response.ok) throw new Error(body.message || "Could not fetch orders from Storbie.");
+        if (!cancelled) setOrders(body.orders);
+      })
+      .catch(err => {
+        if (!cancelled) setError(err.message || "Could not reach the delivery server.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  return (
+    <div className="max-w-6xl mx-auto px-4 py-8">
+      <h1 className="text-2xl font-bold text-slate-900 mb-2">Storbie Orders</h1>
+      <p className="text-slate-500 mb-6">
+        Checkpoint view — proves the RoutePoint connection to Storbie works. Read-only, most recent 25 orders from the last 30 days.
+      </p>
+
+      {error && (
+        <div className="mb-6 bg-red-50 border border-red-300 text-red-800 rounded-xl px-5 py-4 font-semibold">
+          {error}
+        </div>
+      )}
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left">
+            <thead className="bg-slate-50 border-b border-slate-200">
+              <tr>
+                <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Order Ref</th>
+                <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Customer</th>
+                <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Phone</th>
+                <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Address</th>
+                <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Items</th>
+                <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Order Status</th>
+                <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Delivery Status</th>
+                <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Placed At</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {loading && (
+                <tr>
+                  <td colSpan="8" className="px-5 py-10 text-center text-slate-400 font-medium">Loading orders from Storbie…</td>
+                </tr>
+              )}
+              {!loading && !error && orders && orders.length === 0 && (
+                <tr>
+                  <td colSpan="8" className="px-5 py-10 text-center text-slate-400 font-medium">No orders found in this window.</td>
+                </tr>
+              )}
+              {!loading && orders && orders.map(o => (
+                <tr key={o.orderRef}>
+                  <td className="px-5 py-4 font-semibold text-slate-900">{o.orderRef}</td>
+                  <td className="px-5 py-4 text-slate-700">{o.customerName || "—"}</td>
+                  <td className="px-5 py-4 text-slate-700">{o.customerPhone || "—"}</td>
+                  <td className="px-5 py-4 text-slate-500">{o.address || "—"}</td>
+                  <td className="px-5 py-4 text-slate-700">
+                    {o.items.map(i => `${i.quantity}× ${i.name}`).join(", ")}
+                  </td>
+                  <td className="px-5 py-4 text-slate-700">{o.orderStatus}</td>
+                  <td className="px-5 py-4 text-slate-700">{o.deliveryStatus}</td>
+                  <td className="px-5 py-4 text-slate-700 whitespace-nowrap">{new Date(o.placedAt).toLocaleString()}</td>
                 </tr>
               ))}
             </tbody>
@@ -1129,7 +1280,7 @@ function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvan
   if (!delivery) return null;
 
   const nextIndex = TIMELINE_STEPS.findIndex(s => s.key === delivery.status) + 1;
-  const canAdvance = delivery.status !== "delivered" && delivery.status !== "cancelled" && nextIndex < TIMELINE_STEPS.length;
+  const canAdvance = !delivery.liveTracking && delivery.status !== "delivered" && delivery.status !== "cancelled" && nextIndex < TIMELINE_STEPS.length;
   const canCancel = delivery.status !== "delivered" && delivery.status !== "cancelled";
 
   return (
@@ -1139,6 +1290,11 @@ function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvan
       <div className="flex items-center justify-between flex-wrap gap-3 mb-6">
         <h1 className="text-2xl font-bold text-slate-900">Order {delivery.orderRef}</h1>
         <div className="flex items-center gap-2">
+          {delivery.liveTracking && (
+            <span className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-emerald-100 text-emerald-700 whitespace-nowrap">
+              Live tracking
+            </span>
+          )}
           {delivery.coldChain && <ColdChainBadge />}
           <StatusBadge status={delivery.status} />
         </div>
@@ -1185,7 +1341,13 @@ function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvan
               {delivery.trackingUrl && (
                 <div className="flex justify-between gap-4 py-1.5">
                   <span className="text-slate-500">Tracking</span>
-                  <a href={delivery.trackingUrl} onClick={e => e.preventDefault()} className="font-semibold text-blue-600 hover:underline truncate max-w-[60%]">
+                  <a
+                    href={delivery.trackingUrl}
+                    onClick={delivery.liveTracking ? undefined : e => e.preventDefault()}
+                    target={delivery.liveTracking ? "_blank" : undefined}
+                    rel={delivery.liveTracking ? "noopener noreferrer" : undefined}
+                    className="font-semibold text-blue-600 hover:underline truncate max-w-[60%]"
+                  >
                     {delivery.trackingUrl}
                   </a>
                 </div>
@@ -1239,12 +1401,54 @@ function App() {
   const [selectedId, setSelectedId] = useState(null);
   const [banner, setBanner] = useState(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const deliveriesRef = useRef(deliveries);
+
+  useEffect(() => {
+    deliveriesRef.current = deliveries;
+  }, [deliveries]);
 
   useEffect(() => {
     if (!banner) return;
     const id = setTimeout(() => setBanner(null), 4000);
     return () => clearTimeout(id);
   }, [banner]);
+
+  // Poll Uber for live status on any delivery we actually booked through the
+  // real API, while it's still in progress. Feeds both the Ongoing Deliveries
+  // table and the Delivery Detail view, since they read from the same state.
+  useEffect(() => {
+    const interval = setInterval(async () => {
+      const toPoll = deliveriesRef.current.filter(
+        d => d.liveTracking && d.status !== "delivered" && d.status !== "cancelled"
+      );
+      if (toPoll.length === 0) return;
+
+      const results = await Promise.all(
+        toPoll.map(async d => {
+          try {
+            const response = await fetch(`${API_BASE}/deliveries/${d.id}`);
+            if (!response.ok) return null;
+            const body = await parseJsonResponse(response);
+            return mapDeliveryRecord(body);
+          } catch {
+            return null;
+          }
+        })
+      );
+
+      const updates = results.filter(Boolean);
+      if (updates.length === 0) return;
+
+      setDeliveries(prev =>
+        prev.map(d => {
+          const match = updates.find(u => u.id === d.id);
+          return match ? { ...d, ...match } : d;
+        })
+      );
+    }, 15000);
+
+    return () => clearInterval(interval);
+  }, []);
 
   function handleBookDelivery(delivery, options) {
     let finalDelivery = delivery;
@@ -1276,7 +1480,25 @@ function App() {
     setSection("detail");
   }
 
-  function handleCancelDelivery(id) {
+  async function handleCancelDelivery(id) {
+    const target = deliveriesRef.current.find(d => d.id === id);
+
+    if (target && target.liveTracking) {
+      try {
+        const response = await fetch(`${API_BASE}/deliveries/${id}/cancel`, { method: "POST" });
+        const body = await parseJsonResponse(response);
+        if (!response.ok) {
+          setBanner(body.message || "Could not cancel this delivery right now, please try again.");
+          return;
+        }
+        const mapped = mapDeliveryRecord(body);
+        setDeliveries(prev => prev.map(d => (d.id === id ? { ...d, ...mapped } : d)));
+      } catch {
+        setBanner("Could not reach the delivery server to cancel this order. Please try again.");
+      }
+      return;
+    }
+
     setDeliveries(prev => prev.map(d => d.id === id ? { ...d, status: "cancelled", courierName: null, courierPhone: null, trackingUrl: null } : d));
   }
 
@@ -1349,6 +1571,7 @@ function App() {
           />
         )}
         {section === "reports" && <ReportsScreen deliveries={deliveries} />}
+        {section === "storbie" && <StorbieOrdersScreen />}
         {section === "detail" && (
           <DeliveryDetail
             delivery={selectedDelivery}
