@@ -66,14 +66,14 @@ function normalizeOrder(order) {
   };
 }
 
-// Fetches orders, defaulting to the last 30 days if no date range is given
+// Fetches orders, defaulting to the last 7 days if no date range is given
 // (there's no "recent" sort — this is the only reliable way to bound results).
 async function getRecentOrders({ createdFrom, createdTo, status, pageSize } = {}) {
   const apiAddress = requiredEnv("STORBIE_API_ADDRESS");
   const keyCode = requiredEnv("STORBIE_KEY_CODE");
   const secret = requiredEnv("STORBIE_SECRET");
 
-  const from = createdFrom ? new Date(createdFrom) : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const from = createdFrom ? new Date(createdFrom) : new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
   const auth = Buffer.from(`${keyCode}:${secret}`).toString("base64");
 
   const url = new URL(`${apiAddress}/v0.2/orders`);

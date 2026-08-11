@@ -729,6 +729,28 @@ function OngoingDeliveriesTable({ deliveries, onSelect }) {
   );
 }
 
+function LabelStatusBadge({ routePoint }) {
+  if (routePoint && routePoint.labelGenerated) {
+    return (
+      <div>
+        <span className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-green-100 text-green-700 whitespace-nowrap">
+          Label printed
+        </span>
+        {routePoint.trackingNumber && (
+          <div className="text-xs text-slate-500 mt-1 whitespace-nowrap">
+            {routePoint.carrier ? routePoint.carrier + " · " : ""}{routePoint.trackingNumber}
+          </div>
+        )}
+      </div>
+    );
+  }
+  return (
+    <span className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-amber-100 text-amber-800 whitespace-nowrap">
+      Needs label
+    </span>
+  );
+}
+
 function StorbieOrdersScreen() {
   const [orders, setOrders] = useState(null);
   const [error, setError] = useState(null);
@@ -738,7 +760,7 @@ function StorbieOrdersScreen() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    fetch(`${API_BASE}/storbie/orders?pageSize=25`)
+    fetch(`${API_BASE}/storbie/orders`)
       .then(async response => {
         const body = await parseJsonResponse(response);
         if (!response.ok) throw new Error(body.message || "Could not fetch orders from Storbie.");
@@ -753,11 +775,22 @@ function StorbieOrdersScreen() {
     return () => { cancelled = true; };
   }, []);
 
+  const sortedOrders = useMemo(() => {
+    if (!orders) return orders;
+    return orders.slice().sort((a, b) => {
+      const aNeeds = !(a.routePoint && a.routePoint.labelGenerated);
+      const bNeeds = !(b.routePoint && b.routePoint.labelGenerated);
+      if (aNeeds !== bNeeds) return aNeeds ? -1 : 1;
+      return new Date(b.placedAt) - new Date(a.placedAt);
+    });
+  }, [orders]);
+
   return (
     <div className="max-w-6xl mx-auto px-4 py-8">
       <h1 className="text-2xl font-bold text-slate-900 mb-2">Storbie Orders</h1>
       <p className="text-slate-500 mb-6">
-        Checkpoint view — proves the RoutePoint connection to Storbie works. Read-only, most recent 25 orders from the last 30 days.
+        Checkpoint view — proves the RoutePoint connection to Storbie works. Read-only, orders from the last 7 days.
+        Label status below is RoutePoint's own record, not Storbie's order/delivery status.
       </p>
 
       {error && (
@@ -772,6 +805,7 @@ function StorbieOrdersScreen() {
             <thead className="bg-slate-50 border-b border-slate-200">
               <tr>
                 <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Order Ref</th>
+                <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Label</th>
                 <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Customer</th>
                 <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Phone</th>
                 <th className="px-5 py-4 text-xs font-bold text-slate-500 uppercase tracking-wide">Address</th>
@@ -784,17 +818,18 @@ function StorbieOrdersScreen() {
             <tbody className="divide-y divide-slate-100">
               {loading && (
                 <tr>
-                  <td colSpan="8" className="px-5 py-10 text-center text-slate-400 font-medium">Loading orders from Storbie…</td>
+                  <td colSpan="9" className="px-5 py-10 text-center text-slate-400 font-medium">Loading orders from Storbie…</td>
                 </tr>
               )}
-              {!loading && !error && orders && orders.length === 0 && (
+              {!loading && !error && sortedOrders && sortedOrders.length === 0 && (
                 <tr>
-                  <td colSpan="8" className="px-5 py-10 text-center text-slate-400 font-medium">No orders found in this window.</td>
+                  <td colSpan="9" className="px-5 py-10 text-center text-slate-400 font-medium">No orders found in this window.</td>
                 </tr>
               )}
-              {!loading && orders && orders.map(o => (
+              {!loading && sortedOrders && sortedOrders.map(o => (
                 <tr key={o.orderRef}>
                   <td className="px-5 py-4 font-semibold text-slate-900">{o.orderRef}</td>
+                  <td className="px-5 py-4"><LabelStatusBadge routePoint={o.routePoint} /></td>
                   <td className="px-5 py-4 text-slate-700">{o.customerName || "—"}</td>
                   <td className="px-5 py-4 text-slate-700">{o.customerPhone || "—"}</td>
                   <td className="px-5 py-4 text-slate-500">{o.address || "—"}</td>
