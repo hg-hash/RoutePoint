@@ -245,8 +245,20 @@ const NAV_ITEMS = [
   { key: "history", label: "Delivery History" },
   { key: "customers", label: "Customers" },
   { key: "reports", label: "Reports" },
+  { key: "settings", label: "Settings" },
   { key: "storbie", label: "Storbie Orders (checkpoint)" },
 ];
+
+const PROVIDER_LABELS = { uber: "Uber Direct", sherpa: "Sherpa" };
+
+function ProviderTag({ provider }) {
+  if (!provider || !PROVIDER_LABELS[provider]) return null;
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 whitespace-nowrap">
+      via {PROVIDER_LABELS[provider]}
+    </span>
+  );
+}
 
 function Sidebar({ activeSection, onNavigate, onNewDelivery, activeCount, mobileOpen, onCloseMobile }) {
   return (
@@ -394,13 +406,29 @@ function emptyDeliveryForm() {
   };
 }
 
-function NewDeliveryForm({ customers, onBookDelivery, banner }) {
+function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
   const [form, setForm] = useState(emptyDeliveryForm);
   const [errors, setErrors] = useState({});
   const [quote, setQuote] = useState(null);
   const [apiError, setApiError] = useState(null);
   const [quoteLoading, setQuoteLoading] = useState(false);
   const [bookLoading, setBookLoading] = useState(false);
+  const [availableProviders, setAvailableProviders] = useState(null);
+  const [selectedProvider, setSelectedProvider] = useState(null);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/providers`)
+      .then(async response => {
+        const body = await parseJsonResponse(response);
+        if (!response.ok) throw new Error();
+        const available = body.filter(p => p.enabled && p.working);
+        setAvailableProviders(available);
+        if (available.length === 1) setSelectedProvider(available[0].key);
+      })
+      .catch(() => setAvailableProviders([]));
+  }, []);
+
+  const noProvidersAvailable = availableProviders !== null && availableProviders.length === 0;
 
   function update(field, value) {
     setForm(f => ({ ...f, [field]: value }));
@@ -456,6 +484,7 @@ function NewDeliveryForm({ customers, onBookDelivery, banner }) {
           dropoffAddress: form.dropoffAddress.trim(),
           packageNotes: form.packageNotes.trim(),
           coldChain: form.coldChain,
+          provider: selectedProvider,
         }),
       });
       const body = await parseJsonResponse(response);
@@ -489,6 +518,7 @@ function NewDeliveryForm({ customers, onBookDelivery, banner }) {
           dropoffAddress: form.dropoffAddress.trim(),
           packageNotes: form.packageNotes.trim(),
           coldChain: form.coldChain,
+          provider: selectedProvider,
         }),
       });
       const body = await parseJsonResponse(response);
@@ -533,9 +563,32 @@ function NewDeliveryForm({ customers, onBookDelivery, banner }) {
           {apiError}
         </div>
       )}
+      {noProvidersAvailable && (
+        <div className="mb-6 bg-amber-50 border border-amber-300 text-amber-900 rounded-xl px-5 py-4 font-semibold">
+          No delivery providers are currently available.{" "}
+          <button type="button" onClick={() => onNavigate("settings")} className="underline hover:no-underline">
+            Check Settings for status.
+          </button>
+        </div>
+      )}
       <h1 className="text-2xl font-bold text-slate-900 mb-6">New Delivery</h1>
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm p-6 space-y-5">
+          {availableProviders && availableProviders.length > 1 && (
+            <Field label="Delivery provider">
+              <select
+                className={inputClass}
+                value={selectedProvider || ""}
+                onChange={e => setSelectedProvider(e.target.value)}
+              >
+                <option value="" disabled>Choose a provider…</option>
+                {availableProviders.map(p => (
+                  <option key={p.key} value={p.key}>{p.name}</option>
+                ))}
+              </select>
+            </Field>
+          )}
+
           <Field label="Search existing customer" hint="Search by name or phone to reuse a saved customer's details.">
             <div className="relative">
               <input
@@ -655,10 +708,11 @@ function NewDeliveryForm({ customers, onBookDelivery, banner }) {
           <div className="pt-2">
             <button
               onClick={handleGetQuote}
-              disabled={quoteLoading}
+              disabled={quoteLoading || !selectedProvider}
+              title={!selectedProvider ? "Choose a delivery provider first" : undefined}
               className={
                 "w-full sm:w-auto px-8 py-4 rounded-xl font-bold text-lg transition-colors " +
-                (quoteLoading ? "bg-slate-300 text-slate-500 cursor-not-allowed" : "bg-slate-900 text-white hover:bg-slate-800 active:bg-black")
+                (quoteLoading || !selectedProvider ? "bg-slate-300 text-slate-500 cursor-not-allowed" : "bg-slate-900 text-white hover:bg-slate-800 active:bg-black")
               }
             >
               {quoteLoading ? "Getting quote…" : "Get Quote"}
@@ -712,8 +766,11 @@ function OngoingDeliveriesTable({ deliveries, onSelect }) {
                   className="cursor-pointer hover:bg-blue-50 active:bg-blue-100 transition-colors"
                 >
                   <td className="px-5 py-4 font-semibold text-slate-900">
-                    {d.orderRef}
-                    {d.coldChain && <span className="ml-2 text-xs font-bold text-cyan-700">❄</span>}
+                    <div className="flex items-center gap-2">
+                      {d.orderRef}
+                      {d.coldChain && <span className="text-xs font-bold text-cyan-700">❄</span>}
+                    </div>
+                    <ProviderTag provider={d.provider} />
                   </td>
                   <td className="px-5 py-4 text-slate-700">{d.customerName}</td>
                   <td className="px-5 py-4"><StatusBadge status={d.status} /></td>
@@ -991,8 +1048,11 @@ function DeliveryHistoryTable({ deliveries, onSelect }) {
                 >
                   <td className="px-5 py-4 text-slate-700 whitespace-nowrap">{new Date(d.createdAt).toLocaleDateString()}</td>
                   <td className="px-5 py-4 font-semibold text-slate-900">
-                    {d.orderRef}
-                    {d.coldChain && <span className="ml-2 text-xs font-bold text-cyan-700">❄</span>}
+                    <div className="flex items-center gap-2">
+                      {d.orderRef}
+                      {d.coldChain && <span className="text-xs font-bold text-cyan-700">❄</span>}
+                    </div>
+                    <ProviderTag provider={d.provider} />
                   </td>
                   <td className="px-5 py-4 text-slate-700">{d.customerName}</td>
                   <td className="px-5 py-4 text-slate-500">{d.dropoffAddress}</td>
@@ -1299,6 +1359,120 @@ function ReportsScreen({ deliveries }) {
   );
 }
 
+function ToggleSwitch({ checked, disabled, title, onChange }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      disabled={disabled}
+      title={title}
+      onClick={onChange}
+      className={
+        "relative inline-flex h-7 w-12 items-center rounded-full transition-colors shrink-0 " +
+        (disabled
+          ? "bg-slate-200 cursor-not-allowed"
+          : checked
+            ? "bg-blue-600 cursor-pointer"
+            : "bg-slate-300 cursor-pointer hover:bg-slate-400")
+      }
+    >
+      <span
+        className={
+          "inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform " +
+          (checked ? "translate-x-6" : "translate-x-1")
+        }
+      />
+    </button>
+  );
+}
+
+function ProviderCard({ provider, onToggle }) {
+  const statusColor = !provider.built
+    ? "text-slate-400"
+    : provider.working
+      ? "text-green-700"
+      : "text-amber-700";
+
+  return (
+    <div className={"bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex items-start justify-between gap-4 " + (!provider.built ? "opacity-60" : "")}>
+      <div>
+        <div className="font-bold text-slate-900 text-lg">{provider.name}</div>
+        <div className="text-slate-500 mt-1">{provider.description}</div>
+        <div className={"mt-3 text-sm font-semibold " + statusColor}>{provider.statusText}</div>
+      </div>
+      {provider.built ? (
+        <ToggleSwitch
+          checked={provider.enabled}
+          disabled={!provider.enabled && !provider.working}
+          title={!provider.enabled && !provider.working ? `Can't enable yet — ${provider.statusText}` : undefined}
+          onChange={() => onToggle(provider)}
+        />
+      ) : (
+        <span className="text-xs font-bold text-slate-400 uppercase tracking-wide whitespace-nowrap pt-1">No toggle</span>
+      )}
+    </div>
+  );
+}
+
+function SettingsScreen() {
+  const [providers, setProviders] = useState(null);
+  const [error, setError] = useState(null);
+
+  function loadProviders() {
+    setError(null);
+    fetch(`${API_BASE}/providers`)
+      .then(async response => {
+        const body = await parseJsonResponse(response);
+        if (!response.ok) throw new Error(body.message || "Could not load provider settings.");
+        setProviders(body);
+      })
+      .catch(err => setError(err.message || "Could not reach the delivery server."));
+  }
+
+  useEffect(() => {
+    loadProviders();
+  }, []);
+
+  async function handleToggle(provider) {
+    setError(null);
+    try {
+      const response = await fetch(`${API_BASE}/providers/${provider.key}/toggle`, { method: "POST" });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setError(body.message || "Could not update this provider right now.");
+        return;
+      }
+      setProviders(prev => prev.map(p => (p.key === provider.key ? body : p)));
+    } catch {
+      setError("Could not reach the delivery server. Please check it's running and try again.");
+    }
+  }
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 py-8">
+      <h1 className="text-2xl font-bold text-slate-900 mb-2">Delivery Providers</h1>
+      <p className="text-slate-500 mb-6">
+        Enable or disable which providers staff can pick from in New Delivery. A provider can only be turned on once it's actually working.
+      </p>
+
+      {error && (
+        <div className="mb-6 bg-red-50 border border-red-300 text-red-800 rounded-xl px-5 py-4 font-semibold">
+          {error}
+        </div>
+      )}
+
+      {!providers && !error && <p className="text-slate-400">Loading providers…</p>}
+
+      <div className="space-y-4">
+        {providers && providers.map(p => (
+          <ProviderCard key={p.key} provider={p} onToggle={handleToggle} />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function StatusTimeline({ status }) {
   const currentIndex = TIMELINE_STEPS.findIndex(s => s.key === status);
   return (
@@ -1370,7 +1544,10 @@ function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvan
       <button onClick={onBack} className="text-blue-600 font-semibold mb-4 hover:underline">&larr; {backLabel}</button>
 
       <div className="flex items-center justify-between flex-wrap gap-3 mb-6">
-        <h1 className="text-2xl font-bold text-slate-900">Order {delivery.orderRef}</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-slate-900">Order {delivery.orderRef}</h1>
+          <ProviderTag provider={delivery.provider} />
+        </div>
         <div className="flex items-center gap-2">
           {delivery.liveTracking && (
             <span className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-emerald-100 text-emerald-700 whitespace-nowrap">
@@ -1640,7 +1817,7 @@ function App() {
       />
       <div className="md:pl-72">
         <MobileTopBar onOpenMenu={() => setMobileNavOpen(true)} />
-        {section === "new" && <NewDeliveryForm customers={customers} onBookDelivery={handleBookDelivery} banner={banner} />}
+        {section === "new" && <NewDeliveryForm customers={customers} onBookDelivery={handleBookDelivery} banner={banner} onNavigate={navigate} />}
         {section === "ongoing" && <OngoingDeliveriesTable deliveries={deliveries} onSelect={id => handleSelect(id, "ongoing")} />}
         {section === "history" && <DeliveryHistoryTable deliveries={deliveries} onSelect={id => handleSelect(id, "history")} />}
         {section === "customers" && (
@@ -1653,6 +1830,7 @@ function App() {
           />
         )}
         {section === "reports" && <ReportsScreen deliveries={deliveries} />}
+        {section === "settings" && <SettingsScreen />}
         {section === "storbie" && <StorbieOrdersScreen />}
         {section === "detail" && (
           <DeliveryDetail

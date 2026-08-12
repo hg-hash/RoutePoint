@@ -7,29 +7,18 @@ const quoteRouter = require("./routes/quote");
 const deliveriesRouter = require("./routes/deliveries");
 const webhooksRouter = require("./routes/webhooks");
 const storbieRouter = require("./routes/storbie");
+const providersRouter = require("./routes/providers");
 
-const REQUIRED_ENV_VARS = ["UBER_CLIENT_ID", "UBER_CLIENT_SECRET", "UBER_CUSTOMER_ID"];
+// Now that multiple delivery providers exist and the app is designed to
+// handle "no provider currently working" gracefully (see Settings and the
+// New Delivery provider picker), a single provider missing credentials is
+// no longer a reason to refuse to start entirely — it's just reflected as
+// that provider's real status. Nothing here is a hard requirement anymore.
 const OPTIONAL_ENV_GROUPS = [
+  { name: "Uber Direct", vars: ["UBER_CLIENT_ID", "UBER_CLIENT_SECRET", "UBER_CUSTOMER_ID"], affects: '"provider": "uber" (also the default when none is specified)' },
   { name: "Sherpa", vars: ["SHERPA_CLIENT_ID", "SHERPA_CLIENT_SECRET"], affects: '"provider": "sherpa"' },
   { name: "Storbie", vars: ["STORBIE_API_ADDRESS", "STORBIE_KEY_CODE", "STORBIE_SECRET"], affects: "GET /api/storbie/orders" },
 ];
-
-function checkRequiredEnv() {
-  const missing = REQUIRED_ENV_VARS.filter(name => !process.env[name] || !process.env[name].trim());
-  if (missing.length > 0) {
-    console.error("");
-    console.error("=============================================================");
-    console.error(" Cannot start server — missing required environment variables:");
-    missing.forEach(name => console.error(`   - ${name}`));
-    console.error("");
-    console.error(" Open server/.env and fill these in with your Uber Direct");
-    console.error(" sandbox credentials, then restart the server.");
-    console.error(" (See server/.env.example for the full list of variables.)");
-    console.error("=============================================================");
-    console.error("");
-    process.exit(1);
-  }
-}
 
 function checkOptionalEnv() {
   OPTIONAL_ENV_GROUPS.forEach(group => {
@@ -47,7 +36,6 @@ function checkOptionalEnv() {
   });
 }
 
-checkRequiredEnv();
 checkOptionalEnv();
 
 const app = express();
@@ -62,6 +50,7 @@ app.use("/api/quote", quoteRouter);
 app.use("/api/deliveries", deliveriesRouter);
 app.use("/api/webhooks", webhooksRouter);
 app.use("/api/storbie", storbieRouter);
+app.use("/api/providers", providersRouter);
 
 app.use((req, res) => {
   res.status(404).json({ error: "NOT_FOUND", message: "Unknown endpoint." });
@@ -74,5 +63,5 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
-  console.log(`Uber Direct delivery server listening on http://localhost:${PORT} (UBER_ENV=${process.env.UBER_ENV || "unset"})`);
+  console.log(`RoutePoint delivery server listening on http://localhost:${PORT}`);
 });
