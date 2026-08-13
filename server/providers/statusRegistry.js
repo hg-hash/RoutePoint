@@ -27,21 +27,14 @@ const PROVIDER_DEFS = [
     built: true,
     getStatus() {
       const hasCreds = hasEnv(["SHERPA_CLIENT_ID", "SHERPA_CLIENT_SECRET"]);
-      // Confirmed via live testing (including a client-secret reset) that
-      // authentication fails with invalid_client regardless of the
-      // credentials used — an account-side issue Sherpa support is
-      // investigating, not a missing-credentials problem. Update/remove
-      // this once that's resolved and re-verified live; don't replace it
-      // with a per-request live ping (slow, and hits their real API on
-      // every Settings page load).
-      const KNOWN_AUTH_ISSUE = true;
+      // The earlier invalid_client issue was account-side, not a code bug —
+      // resolved by registering a proper QA account and re-verified live on
+      // 2026-08-13 (quote, book, status, cancel all succeeded against the
+      // real API). If this regresses, prefer re-verifying live over
+      // re-adding a hardcoded override — don't guess at "why" from here.
       return {
-        working: hasCreds && !KNOWN_AUTH_ISSUE,
-        statusText: !hasCreds
-          ? "Built, awaiting credentials"
-          : KNOWN_AUTH_ISSUE
-            ? "Built, blocked — Sherpa support investigating an authentication error"
-            : "Working",
+        working: hasCreds,
+        statusText: hasCreds ? "Working" : "Built, awaiting credentials",
       };
     },
   },

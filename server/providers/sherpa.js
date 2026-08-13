@@ -173,18 +173,23 @@ async function sherpaRequest(path, { method = "GET", body, query } = {}) {
   return responseBody;
 }
 
-function normalizeDelivery(sherpaDelivery) {
-  const courier = sherpaDelivery.courier || null;
+function normalizeDelivery(responseBody) {
+  // POST /deliveries returns the delivery object directly, but
+  // GET /deliveries/{id} wraps it as { "delivery": {...} } — confirmed by
+  // hitting both live; their PDF docs only show the POST shape. Unwrap
+  // defensively so this works regardless of which endpoint called it.
+  const delivery = responseBody && responseBody.delivery ? responseBody.delivery : responseBody;
+  const courier = delivery.courier || null;
   return {
-    providerDeliveryId: sherpaDelivery.id,
-    status: normalizeState(sherpaDelivery.state),
-    fee: sherpaDelivery.amount != null ? parseFloat(sherpaDelivery.amount) : null,
-    currency: sherpaDelivery.currency || "AUD",
-    dropoffEta: sherpaDelivery.delivery_etas ? sherpaDelivery.delivery_etas.delivery_eta : null,
-    trackingUrl: sherpaDelivery.delivery_tracking ? sherpaDelivery.delivery_tracking.url : null,
+    providerDeliveryId: delivery.id,
+    status: normalizeState(delivery.state),
+    fee: delivery.amount != null ? parseFloat(delivery.amount) : null,
+    currency: delivery.currency || "AUD",
+    dropoffEta: delivery.delivery_etas ? delivery.delivery_etas.delivery_eta : null,
+    trackingUrl: delivery.delivery_tracking ? delivery.delivery_tracking.url : null,
     courierName: courier ? `${courier.first_name || ""} ${courier.last_name || ""}`.trim() || null : null,
     courierPhone: courier ? courier.mobile_phone : null,
-    raw: sherpaDelivery,
+    raw: delivery,
   };
 }
 

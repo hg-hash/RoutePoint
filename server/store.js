@@ -7,19 +7,24 @@
 
 const deliveries = new Map();
 
+// Route params are always strings, but some providers (Sherpa) hand back
+// a numeric delivery id. Coerce to string on every read/write so a lookup
+// by req.params.id always matches what was saved, regardless of the
+// provider's native id type.
 function saveMetadata(deliveryId, metadata) {
-  deliveries.set(deliveryId, { ...metadata });
+  deliveries.set(String(deliveryId), { ...metadata });
 }
 
 function getMetadata(deliveryId) {
-  return deliveries.get(deliveryId) || null;
+  return deliveries.get(String(deliveryId)) || null;
 }
 
 function updateMetadata(deliveryId, patch) {
-  const existing = deliveries.get(deliveryId);
+  const key = String(deliveryId);
+  const existing = deliveries.get(key);
   if (!existing) return null;
   const updated = { ...existing, ...patch };
-  deliveries.set(deliveryId, updated);
+  deliveries.set(key, updated);
   return updated;
 }
 

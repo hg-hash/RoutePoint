@@ -7,7 +7,10 @@ const router = express.Router();
 
 function buildRecord(id, metadata, normalized) {
   return {
-    id,
+    // Always a string, regardless of the provider's native id type (Sherpa's
+    // is numeric) — keeps every delivery record consistent, since the
+    // frontend does strict-equality id matching (e.g. merging poll results).
+    id: String(id),
     orderRef: metadata.orderRef,
     customerName: metadata.customerName,
     customerPhone: metadata.customerPhone,
