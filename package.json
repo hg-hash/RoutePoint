@@ -1,0 +1,45 @@
+{
+  "name": "routepoint",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RoutePoint desktop app — Electron wrapper around the existing Express backend and index.html frontend.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.medicinesrus.routepoint",
+    "productName": "RoutePoint",
+    "icon": "assets/icon.ico",
+    "directories": {
+      "output": "dist"
+    },
+    "asar": false,
+    "includeSubNodeModules": true,
+    "files": [
+      "main.js",
+      "index.html",
+      "assets/**/*",
+      "server/**/*",
+      "!server/.env",
+      "!server/.env.local",
+      "!server/.env.*.local",
+      "!server/node_modules/.cache"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "assets/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    }
+  }
+}
