@@ -8,6 +8,8 @@ const deliveriesRouter = require("./routes/deliveries");
 const webhooksRouter = require("./routes/webhooks");
 const storbieRouter = require("./routes/storbie");
 const providersRouter = require("./routes/providers");
+const settingsRouter = require("./routes/settings");
+const configRouter = require("./routes/config");
 
 // Now that multiple delivery providers exist and the app is designed to
 // handle "no provider currently working" gracefully (see Settings and the
@@ -18,6 +20,7 @@ const OPTIONAL_ENV_GROUPS = [
   { name: "Uber Direct", vars: ["UBER_CLIENT_ID", "UBER_CLIENT_SECRET", "UBER_CUSTOMER_ID"], affects: '"provider": "uber" (also the default when none is specified)' },
   { name: "Sherpa", vars: ["SHERPA_CLIENT_ID", "SHERPA_CLIENT_SECRET"], affects: '"provider": "sherpa"' },
   { name: "Storbie", vars: ["STORBIE_API_ADDRESS", "STORBIE_KEY_CODE", "STORBIE_SECRET"], affects: "GET /api/storbie/orders" },
+  { name: "Google Maps", vars: ["GOOGLE_MAPS_API_KEY"], affects: "address autocomplete (falls back to plain text fields)" },
 ];
 
 function checkOptionalEnv() {
@@ -51,6 +54,8 @@ app.use("/api/deliveries", deliveriesRouter);
 app.use("/api/webhooks", webhooksRouter);
 app.use("/api/storbie", storbieRouter);
 app.use("/api/providers", providersRouter);
+app.use("/api/settings", settingsRouter);
+app.use("/api/config", configRouter);
 
 app.use((req, res) => {
   res.status(404).json({ error: "NOT_FOUND", message: "Unknown endpoint." });

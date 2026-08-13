@@ -2,6 +2,7 @@ const express = require("express");
 const { getProvider } = require("../providers/registry");
 const store = require("../store");
 const { respondWithProviderError } = require("./respondWithProviderError");
+const { validateScheduledFor } = require("./scheduling");
 
 const router = express.Router();
 
@@ -28,6 +29,8 @@ function buildRecord(id, metadata, normalized) {
     trackingUrl: normalized.trackingUrl,
     packageNotes: metadata.packageNotes,
     coldChain: metadata.coldChain,
+    specialInstructions: metadata.specialInstructions || "",
+    scheduledFor: metadata.scheduledFor || null,
     createdAt: metadata.createdAt,
     liveTracking: true,
   };
@@ -48,6 +51,8 @@ router.post("/", async (req, res) => {
     orderRef,
     packageNotes,
     coldChain,
+    specialInstructions,
+    scheduledFor,
     provider,
   } = req.body || {};
 
@@ -57,6 +62,9 @@ router.post("/", async (req, res) => {
       message: "Missing required delivery details.",
     });
   }
+
+  const schedulingError = validateScheduledFor(scheduledFor, provider);
+  if (schedulingError) return res.status(400).json(schedulingError);
 
   try {
     const { key, module: providerModule } = getProvider(provider);
@@ -77,6 +85,8 @@ router.post("/", async (req, res) => {
       orderRef,
       packageNotes,
       coldChain,
+      specialInstructions,
+      scheduledFor: scheduledFor || null,
     });
 
     const metadata = {
@@ -88,6 +98,8 @@ router.post("/", async (req, res) => {
       dropoffAddress,
       packageNotes: packageNotes || "",
       coldChain: !!coldChain,
+      specialInstructions: specialInstructions || "",
+      scheduledFor: scheduledFor || null,
       provider: key,
       createdAt: new Date().toISOString(),
     };

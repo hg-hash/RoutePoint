@@ -164,16 +164,48 @@ function normalizeDelivery(uberDelivery) {
     trackingUrl: uberDelivery.tracking_url || null,
     courierName: uberDelivery.courier ? uberDelivery.courier.name : null,
     courierPhone: uberDelivery.courier ? uberDelivery.courier.phone_number : null,
+    scheduledFor: uberDelivery.dropoff_ready_dt || null,
     raw: uberDelivery,
   };
 }
 
-async function getQuote({ pickupAddress, dropoffAddress }) {
+// Uber has no single "schedule for later" field — scheduling is a 4-field
+// pickup/dropoff window (see developer.uber.com/docs/deliveries/guides/
+// delivery-window). Confirmed via Uber's own docs; NOT yet live-verified —
+// UBER_CLIENT_SECRET/UBER_CUSTOMER_ID are still missing, so this has never
+// actually been sent to Uber's API. Verify against the real sandbox once
+// credentials exist, before relying on this for a real scheduled booking.
+//
+// Docs give constraints, not a single target time, so a one-field "schedule
+// for later" picker has to pick defaults within them:
+//   pickup_ready_dt    = scheduledFor (the time staff picked)
+//   pickup_deadline_dt = pickup_ready_dt + 60 min (documented minimum)
+//   dropoff_ready_dt   = pickup_deadline_dt (earliest valid value; docs say
+//                        it should be the "desired delivery time", but we
+//                        only collect one timestamp from staff, not two)
+//   dropoff_deadline_dt = dropoff_ready_dt + 240 min (documented minimum for
+//                        same-day/next-day windows)
+function buildSchedulingWindow(scheduledFor) {
+  if (!scheduledFor) return {};
+  const pickupReady = new Date(scheduledFor);
+  const pickupDeadline = new Date(pickupReady.getTime() + 60 * 60000);
+  const dropoffReady = pickupDeadline;
+  const dropoffDeadline = new Date(dropoffReady.getTime() + 240 * 60000);
+  return {
+    pickup_ready_dt: pickupReady.toISOString(),
+    pickup_deadline_dt: pickupDeadline.toISOString(),
+    dropoff_ready_dt: dropoffReady.toISOString(),
+    dropoff_deadline_dt: dropoffDeadline.toISOString(),
+  };
+}
+
+async function getQuote({ pickupAddress, dropoffAddress, scheduledFor }) {
   const body = await uberRequest("/delivery_quotes", {
     method: "POST",
     body: {
       pickup_address: toUberAddress(pickupAddress),
       dropoff_address: toUberAddress(dropoffAddress),
+      ...buildSchedulingWindow(scheduledFor),
     },
   });
 
@@ -183,6 +215,7 @@ async function getQuote({ pickupAddress, dropoffAddress }) {
     currency: body.currency || null,
     dropoffEta: body.dropoff_eta || null,
     quoteExpiresAt: body.expires || null,
+    scheduledFor: scheduledFor || null,
     raw: body,
   };
 }
@@ -196,8 +229,15 @@ async function createDelivery({
   orderRef,
   packageNotes,
   coldChain,
+  specialInstructions,
+  scheduledFor,
 }) {
-  const notes = [packageNotes, coldChain ? "Temperature-sensitive item" : null].filter(Boolean).join(" — ");
+  const coldChainNote = coldChain ? "Temperature-sensitive item" : null;
+  // dropoff_notes carries the courier-facing special instructions (e.g.
+  // "leave with concierge") — that's a dropoff-side concept, so it doesn't
+  // belong on pickup_notes too.
+  const pickupNotes = coldChainNote || undefined;
+  const dropoffNotes = [coldChainNote, specialInstructions || null].filter(Boolean).join(" — ") || undefined;
 
   const body = await uberRequest("/deliveries", {
     method: "POST",
@@ -206,11 +246,11 @@ async function createDelivery({
       pickup_name: PHARMACY_NAME,
       pickup_address: toUberAddress(pickupAddress),
       pickup_phone_number: PHARMACY_PHONE,
-      pickup_notes: notes || undefined,
+      pickup_notes: pickupNotes,
       dropoff_name: customerName,
       dropoff_address: toUberAddress(dropoffAddress),
       dropoff_phone_number: customerPhone,
-      dropoff_notes: notes || undefined,
+      dropoff_notes: dropoffNotes,
       manifest_reference: orderRef,
       manifest_items: [
         {
@@ -220,6 +260,7 @@ async function createDelivery({
       ],
       // TODO: capture real order value from the POS once Phase 3 wires that up.
       manifest_total_value: 2000,
+      ...buildSchedulingWindow(scheduledFor),
     },
   });
 

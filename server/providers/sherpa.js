@@ -189,6 +189,7 @@ function normalizeDelivery(responseBody) {
     trackingUrl: delivery.delivery_tracking ? delivery.delivery_tracking.url : null,
     courierName: courier ? `${courier.first_name || ""} ${courier.last_name || ""}`.trim() || null : null,
     courierPhone: courier ? courier.mobile_phone : null,
+    scheduledFor: delivery.ready_at || null,
     raw: delivery,
   };
 }
@@ -196,13 +197,27 @@ function normalizeDelivery(responseBody) {
 // Sherpa's price_calculators/delivery endpoint takes plain free-text address
 // strings via query params — no structured street/city/state/zip needed,
 // unlike Uber.
-async function getQuote({ pickupAddress, dropoffAddress }) {
+// coldChain and specialInstructions both land on delivery_address_instructions
+// (2-500 chars per Sherpa's schema) — that's the one dropoff-facing courier
+// instructions field Sherpa exposes; there's no separate slot for each.
+function buildDeliveryInstructions(coldChain, specialInstructions) {
+  const parts = [
+    coldChain ? "Temperature-sensitive item — handle with care" : null,
+    specialInstructions || null,
+  ].filter(Boolean);
+  return parts.length ? parts.join(" — ") : undefined;
+}
+
+async function getQuote({ pickupAddress, dropoffAddress, scheduledFor }) {
   const body = await sherpaRequest("/price_calculators/delivery", {
     method: "GET",
     query: {
       vehicle_id: DEFAULT_VEHICLE_ID,
       pickup_address: pickupAddress,
       delivery_address: dropoffAddress,
+      // ready_at confirmed (live, against Sherpa's own schema) on both this
+      // endpoint and POST /deliveries — ISO-8601, omitted/blank means ASAP.
+      ready_at: scheduledFor || undefined,
     },
   });
 
@@ -212,13 +227,22 @@ async function getQuote({ pickupAddress, dropoffAddress }) {
     currency: body.currency || "AUD",
     dropoffEta: null, // not provided at quote time
     quoteExpiresAt: null, // quotes don't expire — they're just estimates
+    scheduledFor: scheduledFor || null,
     raw: body,
   };
 }
 
-async function createDelivery({ pickupAddress, dropoffAddress, customerName, customerPhone, orderRef, packageNotes, coldChain }) {
-  const deliveryInstructions = coldChain ? "Temperature-sensitive item — handle with care" : undefined;
-
+async function createDelivery({
+  pickupAddress,
+  dropoffAddress,
+  customerName,
+  customerPhone,
+  orderRef,
+  packageNotes,
+  coldChain,
+  specialInstructions,
+  scheduledFor,
+}) {
   const body = await sherpaRequest("/deliveries", {
     method: "POST",
     body: {
@@ -232,7 +256,8 @@ async function createDelivery({ pickupAddress, dropoffAddress, customerName, cus
       delivery_address: dropoffAddress,
       delivery_address_contact_name: customerName,
       delivery_address_phone_number: customerPhone,
-      delivery_address_instructions: deliveryInstructions,
+      delivery_address_instructions: buildDeliveryInstructions(coldChain, specialInstructions),
+      ready_at: scheduledFor || undefined,
     },
   });
 

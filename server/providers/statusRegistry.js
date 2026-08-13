@@ -12,6 +12,12 @@ const PROVIDER_DEFS = [
     name: "Uber Direct",
     description: "On-demand courier delivery via Uber's Direct API — quote, booking, live tracking and cancellation.",
     built: true,
+    // Uber supports scheduling via a 4-field pickup/dropoff window (see
+    // providers/uber.js createDelivery) — implemented per Uber's docs but not
+    // yet live-verified, since UBER_CLIENT_SECRET/UBER_CUSTOMER_ID are still
+    // missing. Left true because the capability is real once credentials
+    // land; getStatus().working already gates whether Uber is usable at all.
+    supportsScheduling: true,
     getStatus() {
       const hasCreds = hasEnv(["UBER_CLIENT_ID", "UBER_CLIENT_SECRET", "UBER_CUSTOMER_ID"]);
       return {
@@ -25,6 +31,10 @@ const PROVIDER_DEFS = [
     name: "Sherpa",
     description: "On-demand courier delivery via Sherpa's Delivery API — quote, booking, live tracking and cancellation.",
     built: true,
+    // Confirmed live against Sherpa's own swagger schema: ready_at (ISO-8601)
+    // is accepted on both the quote and booking endpoints and schedules a
+    // future pickup; blank means ASAP. See providers/sherpa.js.
+    supportsScheduling: true,
     getStatus() {
       const hasCreds = hasEnv(["SHERPA_CLIENT_ID", "SHERPA_CLIENT_SECRET"]);
       // The earlier invalid_client issue was account-side, not a code bug —
@@ -43,6 +53,7 @@ const PROVIDER_DEFS = [
     name: "Australia Post",
     description: "Shipping label creation via Australia Post / MyPost Business.",
     built: true,
+    supportsScheduling: false,
     getStatus() {
       // providers/auspost.js is an intentional stub — createLabel() always
       // throws AUSPOST_NOT_IMPLEMENTED. Reflect that honestly rather than
@@ -58,6 +69,7 @@ const PROVIDER_DEFS = [
     name: "DoorDash",
     description: "On-demand courier delivery via DoorDash Drive.",
     built: false,
+    supportsScheduling: false,
     getStatus() {
       return {
         working: false,
@@ -77,6 +89,7 @@ function getAllProviderStatuses() {
       built: def.built,
       working,
       statusText,
+      supportsScheduling: !!def.supportsScheduling,
     };
   });
 }

@@ -117,6 +117,42 @@ async function parseJsonResponse(response) {
   }
 }
 
+// Loads the Maps JS API (Places library) using a key fetched from the backend
+// rather than hardcoded here — see server/routes/config.js. Memoized so every
+// AddressAutocompleteInput on the page shares one script load. Resolves false
+// (never rejects) if there's no key or the script fails, so callers can fall
+// back to a plain text input instead of breaking.
+let mapsLoadPromise = null;
+function loadGoogleMapsPlaces() {
+  if (mapsLoadPromise) return mapsLoadPromise;
+  mapsLoadPromise = fetch(`${API_BASE}/config/maps-key`)
+    .then(async response => {
+      const body = await parseJsonResponse(response);
+      if (!response.ok || !body.apiKey) return false;
+      if (window.google && window.google.maps && window.google.maps.places) return true;
+      return new Promise(resolve => {
+        // Use Google's `callback` param rather than the script's own onload —
+        // with loading=async, onload fires before the places sub-library
+        // chunk actually finishes, so google.maps.places isn't ready yet at
+        // that point (confirmed live: onload fired but places was still
+        // undefined). `callback` is what Google documents as firing only
+        // once everything requested, including `libraries`, is really ready.
+        const callbackName = "__routepointMapsReady";
+        window[callbackName] = () => {
+          delete window[callbackName];
+          resolve(!!(window.google && window.google.maps && window.google.maps.places));
+        };
+        const script = document.createElement("script");
+        script.src = "https://maps.googleapis.com/maps/api/js?key=" + encodeURIComponent(body.apiKey) + "&libraries=places&callback=" + callbackName;
+        script.async = true;
+        script.onerror = () => resolve(false);
+        document.head.appendChild(script);
+      });
+    })
+    .catch(() => false);
+  return mapsLoadPromise;
+}
+
 function seedDeliveries() {
   const base = Date.now();
 
@@ -341,6 +377,95 @@ function Field({ label, children, hint, error }) {
 
 const inputClass = "w-full rounded-xl border border-slate-300 px-4 py-3 text-base focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 placeholder:text-slate-400";
 
+// Address field with Google Places autocomplete when the Maps API is
+// available, falling back to a plain text input otherwise (missing key,
+// script failed to load, etc.) — never a broken field either way.
+// Uses google.maps.places.PlaceAutocompleteElement, not the older
+// google.maps.places.Autocomplete widget: as of March 2025 Google no longer
+// grants the legacy widget to new API keys/customers, and this key is new.
+function AddressAutocompleteInput({ value, onChange, placeholder, className }) {
+  const containerRef = useRef(null);
+  const widgetRef = useRef(null);
+  const latestOnChange = useRef(onChange);
+  latestOnChange.current = onChange;
+  const [mapsAvailable, setMapsAvailable] = useState(null); // null = still deciding
+
+  useEffect(() => {
+    let cancelled = false;
+    loadGoogleMapsPlaces().then(ok => {
+      if (!cancelled) setMapsAvailable(ok);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!mapsAvailable || !containerRef.current || widgetRef.current) return;
+
+    const widget = new google.maps.places.PlaceAutocompleteElement();
+    // The widget's internal shadow root is closed (confirmed live —
+    // widget.shadowRoot is null), so styling/reading/writing through it
+    // isn't possible. `.value` and `.placeholder` are real properties on the
+    // element itself (confirmed live) and are the supported way in instead.
+    widget.value = value || "";
+    if (placeholder) widget.placeholder = placeholder;
+    widget.style.colorScheme = "light"; // widget defaults to a dark theme otherwise
+    widget.style.border = "1px solid #cbd5e1"; // matches inputClass's border-slate-300
+    widget.style.borderRadius = "0.75rem"; // matches inputClass's rounded-xl
+    widget.style.backgroundColor = "#ffffff";
+    widget.style.display = "block";
+    widget.style.width = "100%";
+    containerRef.current.appendChild(widget);
+    widgetRef.current = widget;
+
+    function handleSelect(event) {
+      const place = event.placePrediction.toPlace();
+      place.fetchFields({ fields: ["formattedAddress"] }).then(() => {
+        latestOnChange.current(place.formattedAddress || "");
+      });
+    }
+    // Keeps free-typed text (no suggestion clicked) in sync too — "input" is
+    // a composed event, so it crosses the widget's shadow DOM boundary even
+    // though the shadow root itself is closed.
+    function handleInput(event) {
+      const text = event.target && event.target.value;
+      if (typeof text === "string") latestOnChange.current(text);
+    }
+
+    widget.addEventListener("gmp-select", handleSelect);
+    widget.addEventListener("input", handleInput);
+    return () => {
+      widget.removeEventListener("gmp-select", handleSelect);
+      widget.removeEventListener("input", handleInput);
+    };
+  }, [mapsAvailable]);
+
+  // Keeps the widget's displayed text in sync with `value` — needed because
+  // several callers (Settings, New Delivery's pickup prefill) load their
+  // initial value asynchronously, after this widget already exists.
+  useEffect(() => {
+    const widget = widgetRef.current;
+    if (!widget) return;
+    if (widget.value !== (value || "")) {
+      widget.value = value || "";
+    }
+  }, [value, mapsAvailable]);
+
+  if (mapsAvailable) {
+    return <div ref={containerRef} className="w-full" />;
+  }
+
+  // mapsAvailable === false (no key / load failed) or still null (deciding) —
+  // render a plain input either way so there's no flash of a broken control.
+  return (
+    <input
+      className={className || inputClass}
+      placeholder={placeholder}
+      value={value}
+      onChange={e => onChange(e.target.value)}
+    />
+  );
+}
+
 function useCountdown(targetIso) {
   const [, tick] = useState(0);
   useEffect(() => {
@@ -361,7 +486,12 @@ function QuoteCard({ quote, onBook, bookLoading }) {
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sticky top-24">
-      <div className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Delivery quote</div>
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Delivery quote</div>
+        <span className="inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold bg-blue-50 text-blue-700 whitespace-nowrap">
+          Quote from {PROVIDER_LABELS[quote.provider] || quote.provider}
+        </span>
+      </div>
       <div className="mt-3 flex items-baseline gap-2">
         <span className="text-4xl font-extrabold text-slate-900">{formatMoney(quote.fee, quote.currency)}</span>
       </div>
@@ -403,7 +533,19 @@ function emptyDeliveryForm() {
     customerSearch: "",
     selectedCustomerId: null,
     saveCustomer: false,
+    specialInstructions: "",
+    deliveryTiming: "asap", // "asap" | "scheduled"
+    scheduledDate: "",
+    scheduledTime: "",
   };
+}
+
+// Combines the form's separate date + time inputs into one ISO-8601 string
+// for the backend, or null if either half is missing/invalid.
+function combineScheduledForIso(scheduledDate, scheduledTime) {
+  if (!scheduledDate || !scheduledTime) return null;
+  const local = new Date(`${scheduledDate}T${scheduledTime}`);
+  return isNaN(local.getTime()) ? null : local.toISOString();
 }
 
 function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
@@ -428,10 +570,33 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
       .catch(() => setAvailableProviders([]));
   }, []);
 
+  // Prefill pickup address from Settings, but never clobber an edit the
+  // staff member already made while this was in flight.
+  useEffect(() => {
+    fetch(`${API_BASE}/settings/pickup-address`)
+      .then(async response => {
+        const body = await parseJsonResponse(response);
+        if (!response.ok || !body.pickupAddress) return;
+        setForm(f => (f.pickupAddress === DEFAULT_PICKUP_ADDRESS ? { ...f, pickupAddress: body.pickupAddress } : f));
+      })
+      .catch(() => {});
+  }, []);
+
   const noProvidersAvailable = availableProviders !== null && availableProviders.length === 0;
+  const selectedProviderInfo = availableProviders && availableProviders.find(p => p.key === selectedProvider);
+  const schedulingSupported = !!(selectedProviderInfo && selectedProviderInfo.supportsScheduling);
 
   function update(field, value) {
     setForm(f => ({ ...f, [field]: value }));
+    setQuote(null);
+  }
+
+  function handleProviderChange(key) {
+    setSelectedProvider(key);
+    const newProviderInfo = availableProviders && availableProviders.find(p => p.key === key);
+    if (!newProviderInfo || !newProviderInfo.supportsScheduling) {
+      setForm(f => ({ ...f, deliveryTiming: "asap", scheduledDate: "", scheduledTime: "" }));
+    }
     setQuote(null);
   }
 
@@ -467,8 +632,22 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
     if (!form.customerName.trim()) errs.customerName = "Customer name is required.";
     if (!form.customerPhone.trim()) errs.customerPhone = "Customer phone is required.";
     if (!form.orderRef.trim()) errs.orderRef = "Order / script reference is required.";
+    if (form.deliveryTiming === "scheduled" && schedulingSupported) {
+      const iso = combineScheduledForIso(form.scheduledDate, form.scheduledTime);
+      if (!iso) {
+        errs.scheduledFor = "Choose a date and time to schedule for.";
+      } else if (new Date(iso).getTime() <= Date.now()) {
+        errs.scheduledFor = "Scheduled time must be in the future.";
+      }
+    }
     setErrors(errs);
     return Object.keys(errs).length === 0;
+  }
+
+  function scheduledForPayload() {
+    return form.deliveryTiming === "scheduled" && schedulingSupported
+      ? combineScheduledForIso(form.scheduledDate, form.scheduledTime)
+      : null;
   }
 
   async function handleGetQuote() {
@@ -484,6 +663,8 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
           dropoffAddress: form.dropoffAddress.trim(),
           packageNotes: form.packageNotes.trim(),
           coldChain: form.coldChain,
+          specialInstructions: form.specialInstructions.trim(),
+          scheduledFor: scheduledForPayload(),
           provider: selectedProvider,
         }),
       });
@@ -518,6 +699,8 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
           dropoffAddress: form.dropoffAddress.trim(),
           packageNotes: form.packageNotes.trim(),
           coldChain: form.coldChain,
+          specialInstructions: form.specialInstructions.trim(),
+          scheduledFor: scheduledForPayload(),
           provider: selectedProvider,
         }),
       });
@@ -579,7 +762,7 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
               <select
                 className={inputClass}
                 value={selectedProvider || ""}
-                onChange={e => setSelectedProvider(e.target.value)}
+                onChange={e => handleProviderChange(e.target.value)}
               >
                 <option value="" disabled>Choose a provider…</option>
                 {availableProviders.map(p => (
@@ -627,20 +810,20 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
             )}
           </Field>
 
-          <Field label="Pharmacy pickup address" error={errors.pickupAddress}>
-            <input
+          <Field label="Pharmacy pickup address" error={errors.pickupAddress} hint="Prefilled from Settings — edit freely for a one-off pickup.">
+            <AddressAutocompleteInput
               className={inputClass}
               value={form.pickupAddress}
-              onChange={e => update("pickupAddress", e.target.value)}
+              onChange={value => update("pickupAddress", value)}
             />
           </Field>
 
-          <Field label="Customer dropoff address" error={errors.dropoffAddress} hint="Autocomplete will be added once the maps/geocoding API is wired up.">
-            <input
+          <Field label="Customer dropoff address" error={errors.dropoffAddress}>
+            <AddressAutocompleteInput
               className={inputClass}
               placeholder="e.g. 12 Wattle St, Newtown NSW 2042"
               value={form.dropoffAddress}
-              onChange={e => update("dropoffAddress", e.target.value)}
+              onChange={value => update("dropoffAddress", value)}
             />
           </Field>
 
@@ -704,6 +887,64 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
             />
             <span className="font-semibold text-cyan-900">Temperature-sensitive (cold-chain item)</span>
           </label>
+
+          <Field label="Special instructions for the courier" hint="e.g. &quot;Leave with concierge&quot; — separate from the package notes above.">
+            <textarea
+              className={inputClass}
+              rows={2}
+              placeholder="e.g. Leave with concierge"
+              value={form.specialInstructions}
+              onChange={e => update("specialInstructions", e.target.value)}
+            />
+          </Field>
+
+          <Field label="Delivery timing" error={errors.scheduledFor}>
+            <div className="inline-flex rounded-xl bg-slate-100 p-1">
+              <button
+                type="button"
+                onClick={() => update("deliveryTiming", "asap")}
+                className={
+                  "px-4 py-2 rounded-lg font-semibold text-sm transition-colors " +
+                  (form.deliveryTiming === "asap" ? "bg-white text-blue-700 shadow" : "text-slate-600 hover:text-slate-900")
+                }
+              >
+                ASAP
+              </button>
+              {schedulingSupported && (
+                <button
+                  type="button"
+                  onClick={() => update("deliveryTiming", "scheduled")}
+                  className={
+                    "px-4 py-2 rounded-lg font-semibold text-sm transition-colors " +
+                    (form.deliveryTiming === "scheduled" ? "bg-white text-blue-700 shadow" : "text-slate-600 hover:text-slate-900")
+                  }
+                >
+                  Schedule for later
+                </button>
+              )}
+            </div>
+            {!schedulingSupported && selectedProvider && (
+              <span className="block text-xs text-slate-400 mt-1">
+                {PROVIDER_LABELS[selectedProvider] || selectedProvider} doesn't support scheduling — this will be booked ASAP.
+              </span>
+            )}
+            {schedulingSupported && form.deliveryTiming === "scheduled" && (
+              <div className="mt-3 flex flex-wrap gap-3">
+                <input
+                  type="date"
+                  className={inputClass + " w-auto"}
+                  value={form.scheduledDate}
+                  onChange={e => update("scheduledDate", e.target.value)}
+                />
+                <input
+                  type="time"
+                  className={inputClass + " w-auto"}
+                  value={form.scheduledTime}
+                  onChange={e => update("scheduledTime", e.target.value)}
+                />
+              </div>
+            )}
+          </Field>
 
           <div className="pt-2">
             <button
@@ -774,7 +1015,14 @@ function OngoingDeliveriesTable({ deliveries, onSelect }) {
                   </td>
                   <td className="px-5 py-4 text-slate-700">{d.customerName}</td>
                   <td className="px-5 py-4"><StatusBadge status={d.status} /></td>
-                  <td className="px-5 py-4 text-slate-700">{d.status === "cancelled" ? "—" : formatTime(d.dropoffEta)}</td>
+                  <td className="px-5 py-4 text-slate-700">
+                    {d.status === "cancelled" ? "—" : formatTime(d.dropoffEta)}
+                    {d.scheduledFor && (
+                      <div className="text-xs font-semibold text-blue-600 whitespace-nowrap">
+                        Scheduled {new Date(d.scheduledFor).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}
+                      </div>
+                    )}
+                  </td>
                   <td className="px-5 py-4 text-slate-700">{d.courierName || "—"}</td>
                 </tr>
               ))}
@@ -1106,7 +1354,7 @@ function CustomerFormModal({ initial, onSave, onCancel }) {
             <input className={inputClass} type="tel" value={form.phone} onChange={e => update("phone", e.target.value)} />
           </Field>
           <Field label="Address">
-            <input className={inputClass} value={form.address} onChange={e => update("address", e.target.value)} />
+            <AddressAutocompleteInput className={inputClass} value={form.address} onChange={value => update("address", value)} />
           </Field>
           <Field label="Notes">
             <textarea className={inputClass} rows={2} value={form.notes} onChange={e => update("notes", e.target.value)} />
@@ -1415,6 +1663,98 @@ function ProviderCard({ provider, onToggle }) {
   );
 }
 
+function PickupLocationSection() {
+  const [address, setAddress] = useState("");
+  const [savedAddress, setSavedAddress] = useState("");
+  const [loaded, setLoaded] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState(null);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => {
+    fetch(`${API_BASE}/settings/pickup-address`)
+      .then(async response => {
+        const body = await parseJsonResponse(response);
+        if (!response.ok) throw new Error(body.message || "Could not load the pickup address.");
+        setAddress(body.pickupAddress || "");
+        setSavedAddress(body.pickupAddress || "");
+      })
+      .catch(err => setError(err.message || "Could not reach the delivery server."))
+      .finally(() => setLoaded(true));
+  }, []);
+
+  async function handleSave() {
+    setError(null);
+    setSaved(false);
+    setSaving(true);
+    try {
+      const response = await fetch(`${API_BASE}/settings/pickup-address`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pickupAddress: address.trim() }),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setError(body.message || "Could not save the pickup address.");
+        return;
+      }
+      setSavedAddress(body.pickupAddress);
+      setAddress(body.pickupAddress);
+      setSaved(true);
+    } catch {
+      setError("Could not reach the delivery server. Please check it's running and try again.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const dirty = address.trim() !== savedAddress;
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 mb-8">
+      <h2 className="text-lg font-bold text-slate-900">Pickup Location</h2>
+      <p className="text-slate-500 mt-1 mb-4">
+        The default pharmacy pickup address prefilled on every new delivery. Staff can still override it per-delivery.
+      </p>
+
+      {error && (
+        <div className="mb-4 bg-red-50 border border-red-300 text-red-800 rounded-xl px-4 py-3 text-sm font-semibold">
+          {error}
+        </div>
+      )}
+      {saved && !dirty && (
+        <div className="mb-4 bg-green-50 border border-green-300 text-green-800 rounded-xl px-4 py-3 text-sm font-semibold">
+          Saved.
+        </div>
+      )}
+
+      {!loaded ? (
+        <p className="text-slate-400">Loading…</p>
+      ) : (
+        <div className="flex flex-col sm:flex-row gap-3 sm:items-start">
+          <div className="flex-1">
+            <AddressAutocompleteInput
+              className={inputClass}
+              value={address}
+              onChange={value => { setAddress(value); setSaved(false); }}
+            />
+          </div>
+          <button
+            onClick={handleSave}
+            disabled={saving || !address.trim() || !dirty}
+            className={
+              "px-6 py-3 rounded-xl font-bold whitespace-nowrap transition-colors " +
+              (saving || !address.trim() || !dirty ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-700")
+            }
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function SettingsScreen() {
   const [providers, setProviders] = useState(null);
   const [error, setError] = useState(null);
@@ -1451,7 +1791,11 @@ function SettingsScreen() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-8">
-      <h1 className="text-2xl font-bold text-slate-900 mb-2">Delivery Providers</h1>
+      <h1 className="text-2xl font-bold text-slate-900 mb-6">Settings</h1>
+
+      <PickupLocationSection />
+
+      <h2 className="text-lg font-bold text-slate-900 mb-2">Delivery Providers</h2>
       <p className="text-slate-500 mb-6">
         Enable or disable which providers staff can pick from in New Delivery. A provider can only be turned on once it's actually working.
       </p>
@@ -1587,10 +1931,14 @@ function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvan
           <div className="text-sm font-bold text-slate-500 uppercase tracking-wide mb-3">Package</div>
           <InfoRow label="Notes" value={delivery.packageNotes || "—"} />
           <InfoRow label="Cold chain" value={delivery.coldChain ? "Yes" : "No"} />
+          <InfoRow label="Special instructions" value={delivery.specialInstructions || "—"} />
         </div>
 
         <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
           <div className="text-sm font-bold text-slate-500 uppercase tracking-wide mb-3">Delivery</div>
+          {delivery.scheduledFor && (
+            <InfoRow label="Scheduled for" value={new Date(delivery.scheduledFor).toLocaleString()} />
+          )}
           <InfoRow label="Fee" value={formatMoney(delivery.fee, delivery.currency)} />
           <InfoRow label="ETA" value={delivery.status === "cancelled" ? "—" : formatTime(delivery.dropoffEta)} />
           {delivery.courierName ? (
