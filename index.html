@@ -65,6 +65,18 @@ function formatMoney(fee, currency) {
   return new Intl.NumberFormat("en-AU", { style: "currency", currency: currency || "AUD" }).format(fee);
 }
 
+// Pulls "suburb, STATE POSTCODE" off the end of a free-text AU address (e.g.
+// Google Places' formattedAddress: "45 Bourke Rd, Alexandria NSW 2015,
+// Australia") — a heuristic, not real geocoding, same spirit as the
+// server-side parseAuAddress in providers/uber.js.
+function parseAuAddressTail(address) {
+  if (!address) return { suburb: null, state: null, postcode: null };
+  const cleaned = address.replace(/,\s*Australia\s*$/i, "").trim();
+  const match = cleaned.match(/,?\s*([^,]+?)\s+([A-Za-z]{2,3})\s+(\d{4})\s*$/);
+  if (!match) return { suburb: null, state: null, postcode: null };
+  return { suburb: match[1].trim(), state: match[2].toUpperCase(), postcode: match[3] };
+}
+
 const API_BASE = "http://localhost:4000/api";
 
 // Uber's status vocabulary (pending/pickup/pickup_complete/dropoff/delivered/canceled)
@@ -429,6 +441,124 @@ function combineScheduledForIso(scheduledDate, scheduledTime) {
   return isNaN(local.getTime()) ? null : local.toISOString();
 }
 
+// Informational-only Australia Post postage estimate — AusPost isn't a
+// bookable delivery provider in this app (no label/tracking capability, see
+// server/integrations/auspostPac.js), this just gives staff a ballpark cost
+// via the real PAC API. Weight/dimensions aren't collected anywhere else on
+// the form, so they're asked here with sensible small-parcel defaults.
+function AusPostEstimateWidget({ pickupAddress, dropoffAddress }) {
+  const [open, setOpen] = useState(false);
+  const [weight, setWeight] = useState("0.5");
+  const [length, setLength] = useState("22");
+  const [width, setWidth] = useState("16");
+  const [height, setHeight] = useState("5");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+  const [services, setServices] = useState(null);
+
+  const fromPostcode = parseAuAddressTail(pickupAddress).postcode;
+  const toPostcode = parseAuAddressTail(dropoffAddress).postcode;
+  const canEstimate = !!(fromPostcode && toPostcode);
+
+  async function handleEstimate() {
+    if (!canEstimate) return;
+    setError(null);
+    setServices(null);
+    setLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/auspost/postage-estimate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          fromPostcode,
+          toPostcode,
+          weight: parseFloat(weight) || undefined,
+          length: parseFloat(length) || undefined,
+          width: parseFloat(width) || undefined,
+          height: parseFloat(height) || undefined,
+        }),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setError(body.message || "Could not get a postage estimate right now.");
+        return;
+      }
+      setServices(body.services || []);
+    } catch {
+      setError("Could not reach the delivery server. Please check it's running and try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="rounded-xl border border-slate-200 bg-slate-50 p-4">
+      <button type="button" onClick={() => setOpen(x => !x)} className="text-sm font-semibold text-blue-600 hover:underline">
+        {open ? "Hide Australia Post estimate" : "Estimate Australia Post cost"}
+      </button>
+      <p className="text-xs text-slate-400 mt-1">
+        Informational only — Australia Post can't be booked as a delivery provider here, this just estimates postage cost.
+      </p>
+
+      {open && (
+        <div className="mt-3 space-y-3">
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <label className="block">
+              <span className="block text-xs font-semibold text-slate-500 mb-1">Weight (kg)</span>
+              <input type="number" min="0" step="0.1" className={inputClass} value={weight} onChange={e => setWeight(e.target.value)} />
+            </label>
+            <label className="block">
+              <span className="block text-xs font-semibold text-slate-500 mb-1">Length (cm)</span>
+              <input type="number" min="0" className={inputClass} value={length} onChange={e => setLength(e.target.value)} />
+            </label>
+            <label className="block">
+              <span className="block text-xs font-semibold text-slate-500 mb-1">Width (cm)</span>
+              <input type="number" min="0" className={inputClass} value={width} onChange={e => setWidth(e.target.value)} />
+            </label>
+            <label className="block">
+              <span className="block text-xs font-semibold text-slate-500 mb-1">Height (cm)</span>
+              <input type="number" min="0" className={inputClass} value={height} onChange={e => setHeight(e.target.value)} />
+            </label>
+          </div>
+
+          {!canEstimate && (
+            <p className="text-xs text-amber-700">Enter a complete pickup and dropoff address (with postcode) first.</p>
+          )}
+
+          <button
+            type="button"
+            onClick={handleEstimate}
+            disabled={loading || !canEstimate}
+            className={
+              "px-4 py-2 rounded-lg font-semibold text-sm transition-colors " +
+              (loading || !canEstimate ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-slate-900 text-white hover:bg-slate-800")
+            }
+          >
+            {loading ? "Estimating…" : "Get estimate"}
+          </button>
+
+          {error && <p className="text-sm text-red-600 font-medium">{error}</p>}
+
+          {services && services.length === 0 && !error && (
+            <p className="text-sm text-slate-500">No Australia Post services available for this route.</p>
+          )}
+
+          {services && services.length > 0 && (
+            <ul className="space-y-1.5">
+              {services.map(s => (
+                <li key={s.code} className="text-sm text-slate-700">
+                  <span className="font-semibold">{s.name}:</span> ~{s.price != null ? formatMoney(s.price, "AUD") : "—"}
+                  {s.deliveryTime ? `, ${s.deliveryTime}` : ""}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
   const [form, setForm] = useState(emptyDeliveryForm);
   const [errors, setErrors] = useState({});
@@ -438,6 +568,36 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
   const [bookLoading, setBookLoading] = useState(false);
   const [availableProviders, setAvailableProviders] = useState(null);
   const [selectedProvider, setSelectedProvider] = useState(null);
+  const [dropoffPostcodeWarning, setDropoffPostcodeWarning] = useState(null);
+
+  // Light-touch postcode check via AusPost's real postcode/search — useful
+  // independent of AusPost shipping specifically, so it runs for every
+  // provider. A soft warning only, never blocks the form. Debounced since
+  // this fires on every address edit, and stays silent (no false alarm) if
+  // the check itself fails, e.g. AUSPOST_PAC_API_KEY isn't set yet.
+  useEffect(() => {
+    const parsed = parseAuAddressTail(form.dropoffAddress);
+    if (!parsed.postcode) {
+      setDropoffPostcodeWarning(null);
+      return;
+    }
+    const timeout = setTimeout(() => {
+      const params = new URLSearchParams({ postcode: parsed.postcode });
+      if (parsed.suburb) params.set("suburb", parsed.suburb);
+      if (parsed.state) params.set("state", parsed.state);
+      fetch(`${API_BASE}/auspost/postcode-search?${params.toString()}`)
+        .then(async response => {
+          const body = await parseJsonResponse(response);
+          if (!response.ok) {
+            setDropoffPostcodeWarning(null);
+            return;
+          }
+          setDropoffPostcodeWarning(body.valid === false ? "This postcode doesn't look valid, please check the address." : null);
+        })
+        .catch(() => setDropoffPostcodeWarning(null));
+    }, 600);
+    return () => clearTimeout(timeout);
+  }, [form.dropoffAddress]);
 
   useEffect(() => {
     fetch(`${API_BASE}/providers`)
@@ -653,6 +813,8 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
             </Field>
           )}
 
+          <AusPostEstimateWidget pickupAddress={form.pickupAddress} dropoffAddress={form.dropoffAddress} />
+
           <Field label="Search existing customer" hint="Search by name or phone to reuse a saved customer's details.">
             <div className="relative">
               <input
@@ -706,6 +868,9 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
               value={form.dropoffAddress}
               onChange={value => update("dropoffAddress", value)}
             />
+            {!errors.dropoffAddress && dropoffPostcodeWarning && (
+              <span className="block text-xs text-amber-700 mt-1 font-medium">{dropoffPostcodeWarning}</span>
+            )}
           </Field>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-5">
