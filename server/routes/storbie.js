@@ -1,8 +1,11 @@
 const express = require("express");
 const storbie = require("../integrations/storbie");
 const gosweetspot = require("../providers/gosweetspot");
+const starshipit = require("../providers/starshipit");
 const actionStore = require("../storbieActionStore");
 const { respondWithProviderError } = require("./respondWithProviderError");
+
+const LABEL_PROVIDERS = { gosweetspot, starshipit };
 
 const router = express.Router();
 
@@ -43,22 +46,24 @@ router.post("/orders/:orderRef/mark-actioned", (req, res) => {
   res.json({ orderRef, routePoint: record });
 });
 
-// POST /api/storbie/orders/:orderRef/create-label — { customerName, customerPhone,
-// address, quoteId, weight, length, width, height }. quoteId comes from a
-// prior POST /api/shipping-labels/gosweetspot/rates call — staff pick a
-// carrier/service from that comparison first, this books the actual
-// shipment via GoSweetSpot (see providers/gosweetspot.js — generic across
-// whatever carriers are enabled on the account, not hardcoded to Australia
-// Post, which isn't confirmed available on this account yet). On success,
-// marks the order actioned with the real tracking number and whichever
-// carrier was actually used; on failure nothing is marked and the frontend
-// sees a clean error.
+// POST /api/storbie/orders/:orderRef/create-label — { provider?, customerName,
+// customerPhone, address, quoteId, weight, length, width, height }. quoteId
+// comes from a prior rates call against the SAME provider (either
+// POST /api/shipping-labels/gosweetspot/rates or .../starshipit/rates) —
+// staff pick a carrier/service from that comparison first. provider
+// defaults to "gosweetspot" for backwards compatibility with callers that
+// predate Starshipit. Starshipit's createLabel() currently throws
+// NOT_IMPLEMENTED (see providers/starshipit.js) — that surfaces here as a
+// normal provider error, not a crash. On success, marks the order actioned
+// with the real tracking number and whichever carrier was actually used;
+// on failure nothing is marked and the frontend sees a clean error.
 router.post("/orders/:orderRef/create-label", async (req, res) => {
   const { orderRef } = req.params;
-  const { customerName, customerPhone, address, quoteId, weight, length, width, height } = req.body || {};
+  const { provider, customerName, customerPhone, address, quoteId, weight, length, width, height } = req.body || {};
+  const labelProvider = LABEL_PROVIDERS[provider] || LABEL_PROVIDERS.gosweetspot;
 
   try {
-    const shipment = await gosweetspot.createLabel({
+    const shipment = await labelProvider.createLabel({
       quoteId,
       destinationName: customerName,
       destinationAddress: address,

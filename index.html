@@ -1172,11 +1172,17 @@ function StorbieOrderCard({ order, onPrintLabel }) {
 }
 
 // Shown when staff click "Print Label" on a Storbie order — GoSweetSpot has
-// no single "the" carrier (Australia Post isn't confirmed available on this
-// account yet), so this always compares whatever carriers are actually
-// enabled and lets staff pick one, rather than assuming a default. Kept
-// deliberately simple (a plain list, not the New Delivery form's fuller
-// quote-card styling) since this is a secondary, occasional flow.
+// no single "the" carrier, so this always compares whatever carriers are
+// actually enabled and lets staff pick one, rather than assuming a
+// default. Also queries Starshipit's rates in parallel, scoped to
+// Australia Post/MyPost Business only (see providers/starshipit.js) —
+// clearly labeled so it's obvious which option is actually AusPost. Either
+// provider's rates simply don't appear if that provider isn't configured
+// (missing API key) — same graceful fallback used elsewhere. Starshipit
+// label creation isn't wired up yet, so its rate rows show a disabled
+// note instead of a working "Book this" button. Kept deliberately simple
+// (a plain list, not the New Delivery form's fuller quote-card styling)
+// since this is a secondary, occasional flow.
 function ShippingRateModal({ order, onClose, onBooked }) {
   const [weight, setWeight] = useState("0.5");
   const [length, setLength] = useState("22");
@@ -1188,32 +1194,45 @@ function ShippingRateModal({ order, onClose, onBooked }) {
   const [bookingQuoteId, setBookingQuoteId] = useState(null);
   const [bookError, setBookError] = useState(null);
 
+  async function fetchProviderRates(provider) {
+    const dims = {
+      destinationName: order.customerName,
+      destinationAddress: order.address,
+      destinationPhone: order.customerPhone,
+      weight: parseFloat(weight) || undefined,
+      length: parseFloat(length) || undefined,
+      width: parseFloat(width) || undefined,
+      height: parseFloat(height) || undefined,
+      orderRef: order.orderRef,
+    };
+    try {
+      const response = await fetch(`${API_BASE}/shipping-labels/${provider}/rates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(dims),
+      });
+      const body = await parseJsonResponse(response);
+      // Not configured (missing API key) or otherwise unavailable — this
+      // provider's options just don't appear, same graceful fallback used
+      // elsewhere, rather than blocking the other provider's real rates.
+      if (!response.ok) return [];
+      return (body.available || []).map(r => ({ ...r, provider }));
+    } catch {
+      return [];
+    }
+  }
+
   async function handleGetRates() {
     setRatesError(null);
     setBookError(null);
     setRates(null);
     setRatesLoading(true);
     try {
-      const response = await fetch(`${API_BASE}/shipping-labels/gosweetspot/rates`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          destinationName: order.customerName,
-          destinationAddress: order.address,
-          destinationPhone: order.customerPhone,
-          weight: parseFloat(weight) || undefined,
-          length: parseFloat(length) || undefined,
-          width: parseFloat(width) || undefined,
-          height: parseFloat(height) || undefined,
-          orderRef: order.orderRef,
-        }),
-      });
-      const body = await parseJsonResponse(response);
-      if (!response.ok) {
-        setRatesError(body.message || "Could not get shipping rates right now.");
-        return;
-      }
-      setRates(body.available || []);
+      const [gosweetspotRates, starshipitRates] = await Promise.all([
+        fetchProviderRates("gosweetspot"),
+        fetchProviderRates("starshipit"),
+      ]);
+      setRates([...gosweetspotRates, ...starshipitRates]);
     } catch {
       setRatesError("Could not reach the delivery server. Please check it's running and try again.");
     } finally {
@@ -1221,18 +1240,19 @@ function ShippingRateModal({ order, onClose, onBooked }) {
     }
   }
 
-  async function handleBook(quoteId) {
+  async function handleBook(rate) {
     setBookError(null);
-    setBookingQuoteId(quoteId);
+    setBookingQuoteId(rate.quoteId);
     try {
       const response = await fetch(`${API_BASE}/storbie/orders/${encodeURIComponent(order.orderRef)}/create-label`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          provider: rate.provider,
           customerName: order.customerName,
           customerPhone: order.customerPhone,
           address: order.address,
-          quoteId,
+          quoteId: rate.quoteId,
           weight: parseFloat(weight) || undefined,
           length: parseFloat(length) || undefined,
           width: parseFloat(width) || undefined,
@@ -1298,25 +1318,37 @@ function ShippingRateModal({ order, onClose, onBooked }) {
 
         {rates && rates.length > 0 && (
           <ul className="space-y-2 mb-4">
-            {rates.map(r => (
-              <li key={r.quoteId} className="flex items-center justify-between gap-3 border border-slate-200 rounded-xl px-4 py-3">
-                <div className="min-w-0">
-                  <div className="font-semibold text-slate-900">{r.carrierName} — {r.service}</div>
-                  <div className="text-sm text-slate-500">{formatMoney(r.cost, "AUD")}</div>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleBook(r.quoteId)}
-                  disabled={bookingQuoteId !== null}
-                  className={
-                    "px-4 py-2 rounded-lg font-semibold text-sm whitespace-nowrap shrink-0 transition-colors " +
-                    (bookingQuoteId !== null ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-700")
-                  }
-                >
-                  {bookingQuoteId === r.quoteId ? "Booking…" : "Book this"}
-                </button>
-              </li>
-            ))}
+            {rates.map(r => {
+              const isStarshipit = r.provider === "starshipit";
+              return (
+                <li key={`${r.provider}-${r.quoteId}`} className="flex items-center justify-between gap-3 border border-slate-200 rounded-xl px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-900">
+                      {isStarshipit ? "Starshipit — Australia Post" : r.carrierName}
+                      {r.service ? ` — ${r.service}` : ""}
+                    </div>
+                    <div className="text-sm text-slate-500">{formatMoney(r.cost, "AUD")}</div>
+                  </div>
+                  {isStarshipit ? (
+                    <span className="text-xs text-slate-400 whitespace-nowrap shrink-0" title="Label creation for Starshipit isn't wired up yet — see providers/starshipit.js">
+                      Booking not available yet
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => handleBook(r)}
+                      disabled={bookingQuoteId !== null}
+                      className={
+                        "px-4 py-2 rounded-lg font-semibold text-sm whitespace-nowrap shrink-0 transition-colors " +
+                        (bookingQuoteId !== null ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-700")
+                      }
+                    >
+                      {bookingQuoteId === r.quoteId ? "Booking…" : "Book this"}
+                    </button>
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
 
@@ -1326,6 +1358,96 @@ function ShippingRateModal({ order, onClose, onBooked }) {
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+// Shown above the order list once at least one label has been created but
+// not yet covered by a booked pickup. Grouped by carrier since a pickup
+// booking is per-carrier — GoSweetSpot's own dashboard already batches
+// multiple labels for the same carrier into one "Queued Shipments" pickup,
+// this just triggers that pickup request. NOT confirmed working for this
+// account's actual carriers yet — GoSweetSpot's own docs only list NZ
+// carriers (Castle Parcels, Post Haste, NZ Couriers, Mainstream, FedEx, NZ
+// Post, First Global, TIL Freight) as supported for /api/bookpickup, none
+// of which match Aramex/CouriersPlease/TNT.
+function PendingPickupPanel({ orders, onBooked }) {
+  const [bookingCarrier, setBookingCarrier] = useState(null);
+  const [error, setError] = useState(null);
+  const [result, setResult] = useState(null);
+
+  const groups = useMemo(() => {
+    const byCarrier = new Map();
+    orders.forEach(o => {
+      const rp = o.routePoint;
+      if (!rp || !rp.labelGenerated || rp.pickupBooked) return;
+      const carrier = rp.carrier || "Unknown carrier";
+      if (!byCarrier.has(carrier)) byCarrier.set(carrier, []);
+      byCarrier.get(carrier).push(o);
+    });
+    return Array.from(byCarrier.entries()).map(([carrier, list]) => ({ carrier, orders: list }));
+  }, [orders]);
+
+  if (groups.length === 0) return null;
+
+  async function handleBookPickup(carrier, group) {
+    setError(null);
+    setResult(null);
+    setBookingCarrier(carrier);
+    try {
+      const response = await fetch(`${API_BASE}/shipping-labels/gosweetspot/pickup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          carrier,
+          consignments: group.orders.map(o => o.routePoint.trackingNumber).filter(Boolean),
+          orderRefs: group.orders.map(o => o.orderRef),
+        }),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setError(body.message || `Could not book a pickup for ${carrier}.`);
+        return;
+      }
+      setResult(body.message || "Pickup booked.");
+      onBooked(group.orders.map(o => o.orderRef));
+    } catch {
+      setError("Could not reach the delivery server. Please check it's running and try again.");
+    } finally {
+      setBookingCarrier(null);
+    }
+  }
+
+  return (
+    <div className="mb-6 bg-amber-50 border border-amber-200 rounded-2xl px-5 py-4">
+      <h2 className="font-bold text-slate-900 mb-1">Pending pickup</h2>
+      <p className="text-sm text-slate-600 mb-3">
+        Labels created but not yet covered by a booked pickup. Not confirmed to work for every carrier below yet —
+        GoSweetSpot's pickup-booking API documents NZ carrier support only.
+      </p>
+      <div className="space-y-2">
+        {groups.map(({ carrier, orders: group }) => (
+          <div key={carrier} className="flex items-center justify-between gap-3 bg-white rounded-xl border border-amber-100 px-4 py-3">
+            <div className="text-sm">
+              <span className="font-semibold text-slate-900">{carrier}</span>
+              <span className="text-slate-500"> — {group.length} label{group.length === 1 ? "" : "s"} queued</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => handleBookPickup(carrier, { orders: group })}
+              disabled={bookingCarrier !== null}
+              className={
+                "px-4 py-2 rounded-lg font-semibold text-sm whitespace-nowrap transition-colors " +
+                (bookingCarrier !== null ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-amber-600 text-white hover:bg-amber-700")
+              }
+            >
+              {bookingCarrier === carrier ? "Booking…" : "Book pickup"}
+            </button>
+          </div>
+        ))}
+      </div>
+      {error && <p className="text-sm text-red-600 font-medium mt-3">{error}</p>}
+      {result && <p className="text-sm text-green-700 font-medium mt-3">{result}</p>}
     </div>
   );
 }
@@ -1382,6 +1504,19 @@ function StorbieOrdersScreen() {
       {loading && <p className="text-slate-400">Loading orders from Storbie…</p>}
       {!loading && !error && sortedOrders && sortedOrders.length === 0 && (
         <p className="text-slate-400">No orders found in this window.</p>
+      )}
+
+      {!loading && sortedOrders && (
+        <PendingPickupPanel
+          orders={sortedOrders}
+          onBooked={bookedOrderRefs => {
+            setOrders(prev => prev.map(o =>
+              bookedOrderRefs.includes(o.orderRef)
+                ? { ...o, routePoint: { ...o.routePoint, pickupBooked: true, pickupBookedAt: new Date().toISOString() } }
+                : o
+            ));
+          }}
+        />
       )}
 
       <div className="space-y-4">

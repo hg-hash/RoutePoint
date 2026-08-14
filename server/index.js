@@ -13,6 +13,7 @@ const configRouter = require("./routes/config");
 const customersRouter = require("./routes/customers");
 const auspostPacRouter = require("./routes/auspostPac");
 const gosweetspotRouter = require("./routes/gosweetspot");
+const starshipitRouter = require("./routes/starshipit");
 const { DATA_DIR } = require("./dataStore");
 
 // Now that multiple delivery providers exist and the app is designed to
@@ -27,6 +28,7 @@ const OPTIONAL_ENV_GROUPS = [
   { name: "Google Maps", vars: ["GOOGLE_MAPS_API_KEY"], affects: "address autocomplete (falls back to plain text fields)" },
   { name: "AusPost PAC", vars: ["AUSPOST_PAC_API_KEY"], affects: "GET/POST /api/auspost/* (postage estimate + postcode search — not label creation)" },
   { name: "GoSweetSpot", vars: ["GOSWEETSPOT_API_KEY"], affects: "shipping label creation (POST /api/storbie/orders/:orderRef/create-label and /api/shipping-labels/gosweetspot/*)" },
+  { name: "Starshipit", vars: ["STARSHIPIT_API_KEY", "STARSHIPIT_SUBSCRIPTION_KEY"], affects: "Australia Post/MyPost Business rates (/api/shipping-labels/starshipit/*) — label creation not yet implemented, see providers/starshipit.js" },
 ];
 
 function checkOptionalEnv() {
@@ -65,6 +67,7 @@ app.use("/api/config", configRouter);
 app.use("/api/customers", customersRouter);
 app.use("/api/auspost", auspostPacRouter);
 app.use("/api/shipping-labels/gosweetspot", gosweetspotRouter);
+app.use("/api/shipping-labels/starshipit", starshipitRouter);
 
 app.use((req, res) => {
   res.status(404).json({ error: "NOT_FOUND", message: "Unknown endpoint." });
