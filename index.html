@@ -1895,6 +1895,27 @@ function App() {
     deliveriesRef.current = deliveries;
   }, [deliveries]);
 
+  // Repopulate from the backend's persisted store on startup — customers and
+  // deliveries live on disk now (see server/dataStore.js), not just in this
+  // window's memory, so they survive app restarts/rebuilds/reinstalls.
+  useEffect(() => {
+    fetch(`${API_BASE}/deliveries`)
+      .then(async response => {
+        const body = await parseJsonResponse(response);
+        if (!response.ok || !Array.isArray(body)) return;
+        setDeliveries(body.map(mapDeliveryRecord));
+      })
+      .catch(() => {});
+
+    fetch(`${API_BASE}/customers`)
+      .then(async response => {
+        const body = await parseJsonResponse(response);
+        if (!response.ok || !Array.isArray(body)) return;
+        setCustomers(body);
+      })
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     if (!banner) return;
     const id = setTimeout(() => setBanner(null), 4000);
@@ -1938,23 +1959,37 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  function handleBookDelivery(delivery, options) {
+  async function handleBookDelivery(delivery, options) {
     let finalDelivery = delivery;
 
     if (options && options.saveNewCustomer) {
-      const newCustomer = {
-        id: "CUST-" + Math.random().toString(36).slice(2, 8).toUpperCase(),
-        name: options.newCustomerData.name,
-        phone: options.newCustomerData.phone,
-        address: options.newCustomerData.address,
-        notes: options.newCustomerData.notes || "",
-        createdAt: delivery.createdAt,
-        lastDeliveryAt: delivery.createdAt,
-      };
-      setCustomers(prev => [...prev, newCustomer]);
-      finalDelivery = { ...delivery, customerId: newCustomer.id };
+      try {
+        const response = await fetch(`${API_BASE}/customers`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(options.newCustomerData),
+        });
+        const newCustomer = await parseJsonResponse(response);
+        if (response.ok) {
+          setCustomers(prev => [...prev, newCustomer]);
+          finalDelivery = { ...delivery, customerId: newCustomer.id };
+        }
+      } catch {
+        // The delivery itself is already booked — don't block on this,
+        // just skip saving/linking the customer.
+      }
     } else if (delivery.customerId) {
-      setCustomers(prev => prev.map(c => c.id === delivery.customerId ? { ...c, lastDeliveryAt: delivery.createdAt } : c));
+      fetch(`${API_BASE}/customers/${delivery.customerId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lastDeliveryAt: delivery.createdAt }),
+      })
+        .then(async response => {
+          if (!response.ok) return;
+          const updated = await parseJsonResponse(response);
+          setCustomers(prev => prev.map(c => (c.id === delivery.customerId ? updated : c)));
+        })
+        .catch(() => {});
     }
 
     setDeliveries(prev => [finalDelivery, ...prev]);
@@ -2010,19 +2045,54 @@ function App() {
     }));
   }
 
-  function handleAddCustomer(values) {
-    setCustomers(prev => [
-      ...prev,
-      { id: "CUST-" + Math.random().toString(36).slice(2, 8).toUpperCase(), ...values, createdAt: new Date().toISOString(), lastDeliveryAt: null },
-    ]);
+  async function handleAddCustomer(values) {
+    try {
+      const response = await fetch(`${API_BASE}/customers`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setBanner(body.message || "Could not save this customer right now.");
+        return;
+      }
+      setCustomers(prev => [...prev, body]);
+    } catch {
+      setBanner("Could not reach the delivery server. Please check it's running and try again.");
+    }
   }
 
-  function handleUpdateCustomer(id, values) {
-    setCustomers(prev => prev.map(c => c.id === id ? { ...c, ...values } : c));
+  async function handleUpdateCustomer(id, values) {
+    try {
+      const response = await fetch(`${API_BASE}/customers/${id}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(values),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setBanner(body.message || "Could not update this customer right now.");
+        return;
+      }
+      setCustomers(prev => prev.map(c => (c.id === id ? body : c)));
+    } catch {
+      setBanner("Could not reach the delivery server. Please check it's running and try again.");
+    }
   }
 
-  function handleDeleteCustomer(id) {
-    setCustomers(prev => prev.filter(c => c.id !== id));
+  async function handleDeleteCustomer(id) {
+    try {
+      const response = await fetch(`${API_BASE}/customers/${id}`, { method: "DELETE" });
+      if (!response.ok) {
+        const body = await parseJsonResponse(response);
+        setBanner(body.message || "Could not delete this customer right now.");
+        return;
+      }
+      setCustomers(prev => prev.filter(c => c.id !== id));
+    } catch {
+      setBanner("Could not reach the delivery server. Please check it's running and try again.");
+    }
   }
 
   function navigate(key) {

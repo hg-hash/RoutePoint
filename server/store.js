@@ -1,31 +1,42 @@
-// In-memory store for delivery metadata that Uber doesn't track for us
-// (order ref, our own customer link, package notes, etc).
-// Keyed by the provider's delivery id. This is intentionally simple —
-// it will be replaced with real persistence in a later phase.
-// The webhook handler also uses this to find which local order an
-// incoming Uber event belongs to.
+// Disk-persisted store of delivery records (see dataStore.js for where the
+// file actually lives, and why). Stores the full buildRecord() shape from
+// routes/deliveries.js, keyed by delivery id — always coerced to string,
+// since Sherpa hands back a numeric id but Express route params (and the
+// frontend's id matching) are always strings.
+//
+// Storing the full record, not just booking-time metadata, means
+// GET /api/deliveries can list everything without live-refreshing every
+// delivery against its provider — the frontend's own polling already keeps
+// ongoing ones fresh.
 
-const deliveries = new Map();
+const { loadJson, saveJson } = require("./dataStore");
 
-// Route params are always strings, but some providers (Sherpa) hand back
-// a numeric delivery id. Coerce to string on every read/write so a lookup
-// by req.params.id always matches what was saved, regardless of the
-// provider's native id type.
-function saveMetadata(deliveryId, metadata) {
-  deliveries.set(String(deliveryId), { ...metadata });
+const FILE = "deliveries.json";
+let deliveries = loadJson(FILE, {});
+
+function persist() {
+  saveJson(FILE, deliveries);
 }
 
-function getMetadata(deliveryId) {
-  return deliveries.get(String(deliveryId)) || null;
-}
-
-function updateMetadata(deliveryId, patch) {
+function saveRecord(deliveryId, record) {
   const key = String(deliveryId);
-  const existing = deliveries.get(key);
-  if (!existing) return null;
-  const updated = { ...existing, ...patch };
-  deliveries.set(key, updated);
-  return updated;
+  deliveries = { ...deliveries, [key]: record };
+  persist();
+  return record;
 }
 
-module.exports = { saveMetadata, getMetadata, updateMetadata };
+function getRecord(deliveryId) {
+  return deliveries[String(deliveryId)] || null;
+}
+
+function getAllRecords() {
+  return Object.values(deliveries);
+}
+
+// Used by the webhook handler to find which local order an incoming
+// provider event belongs to.
+function getMetadata(deliveryId) {
+  return getRecord(deliveryId);
+}
+
+module.exports = { saveRecord, getRecord, getAllRecords, getMetadata };

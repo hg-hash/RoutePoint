@@ -10,6 +10,8 @@ const storbieRouter = require("./routes/storbie");
 const providersRouter = require("./routes/providers");
 const settingsRouter = require("./routes/settings");
 const configRouter = require("./routes/config");
+const customersRouter = require("./routes/customers");
+const { DATA_DIR } = require("./dataStore");
 
 // Now that multiple delivery providers exist and the app is designed to
 // handle "no provider currently working" gracefully (see Settings and the
@@ -56,6 +58,7 @@ app.use("/api/storbie", storbieRouter);
 app.use("/api/providers", providersRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/config", configRouter);
+app.use("/api/customers", customersRouter);
 
 app.use((req, res) => {
   res.status(404).json({ error: "NOT_FOUND", message: "Unknown endpoint." });
@@ -69,4 +72,5 @@ app.use((err, req, res, next) => {
 const PORT = process.env.PORT || 4000;
 app.listen(PORT, () => {
   console.log(`RoutePoint delivery server listening on http://localhost:${PORT}`);
+  console.log(`Customer/delivery data persisted to ${DATA_DIR}`);
 });

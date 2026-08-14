@@ -103,28 +103,38 @@ router.post("/", async (req, res) => {
       provider: key,
       createdAt: new Date().toISOString(),
     };
-    store.saveMetadata(normalized.providerDeliveryId, metadata);
+    const record = buildRecord(normalized.providerDeliveryId, metadata, normalized);
+    store.saveRecord(normalized.providerDeliveryId, record);
 
-    res.status(201).json(buildRecord(normalized.providerDeliveryId, metadata, normalized));
+    res.status(201).json(record);
   } catch (err) {
     respondWithProviderError(res, err, "Could not book this delivery right now, please try again.");
   }
+});
+
+// GET /api/deliveries — every delivery ever booked through this app, from
+// the persisted store (no live provider calls — the frontend's own polling
+// keeps ongoing ones fresh). Used to repopulate the app on startup.
+router.get("/", (req, res) => {
+  res.json(store.getAllRecords());
 });
 
 // GET /api/deliveries/:id — current status/courier info, from whichever
 // provider this delivery was actually booked with.
 router.get("/:id", async (req, res) => {
   const { id } = req.params;
-  const metadata = store.getMetadata(id);
+  const existing = store.getRecord(id);
 
-  if (!metadata) {
+  if (!existing) {
     return res.status(404).json({ error: "NOT_FOUND", message: "Delivery not found." });
   }
 
   try {
-    const { module: providerModule } = getProvider(metadata.provider);
+    const { module: providerModule } = getProvider(existing.provider);
     const normalized = await providerModule.getStatus(id);
-    res.json(buildRecord(id, metadata, normalized));
+    const record = buildRecord(id, existing, normalized);
+    store.saveRecord(id, record);
+    res.json(record);
   } catch (err) {
     respondWithProviderError(res, err, "Could not fetch this delivery's status right now, please try again.");
   }
@@ -133,16 +143,18 @@ router.get("/:id", async (req, res) => {
 // POST /api/deliveries/:id/cancel
 router.post("/:id/cancel", async (req, res) => {
   const { id } = req.params;
-  const metadata = store.getMetadata(id);
+  const existing = store.getRecord(id);
 
-  if (!metadata) {
+  if (!existing) {
     return res.status(404).json({ error: "NOT_FOUND", message: "Delivery not found." });
   }
 
   try {
-    const { module: providerModule } = getProvider(metadata.provider);
+    const { module: providerModule } = getProvider(existing.provider);
     const normalized = await providerModule.cancelDelivery(id);
-    res.json(buildRecord(id, metadata, normalized));
+    const record = buildRecord(id, existing, normalized);
+    store.saveRecord(id, record);
+    res.json(record);
   } catch (err) {
     respondWithProviderError(res, err, "Could not cancel this delivery right now, please try again.");
   }
