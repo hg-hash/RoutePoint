@@ -56,27 +56,6 @@ const COURIER_POOL = [
   { name: "Sofia Rossi", phone: "0466 555 044" },
 ];
 
-const CUSTOMER_POOL = [
-  { name: "Margaret Hughes", phone: "0400 111 222", address: "12 Wattle St, Newtown NSW 2042" },
-  { name: "Trevor Lim", phone: "0400 333 444", address: "45 Bourke Rd, Alexandria NSW 2015" },
-  { name: "Sonia Patel", phone: "0400 555 666", address: "8 King St, Rozelle NSW 2039" },
-  { name: "Ben Carter", phone: "0400 777 888", address: "3 Church Ave, Marrickville NSW 2204" },
-  { name: "Diane Osei", phone: "0400 999 000", address: "77 Glebe Point Rd, Glebe NSW 2037" },
-  { name: "Harold Nguyen", phone: "0411 222 333", address: "5 Bay St, Botany NSW 2019" },
-  { name: "Linda Chen", phone: "0411 444 555", address: "22 Enmore Rd, Enmore NSW 2042" },
-  { name: "Peter Walsh", phone: "0411 666 777", address: "9 Denison St, Camperdown NSW 2050" },
-  { name: "Grace Kelly", phone: "0411 888 999", address: "18 Illawarra Rd, Marrickville NSW 2204" },
-  { name: "Ahmed Farouk", phone: "0422 111 000", address: "31 Crown St, Surry Hills NSW 2010" },
-];
-
-function daysAgoIso(days, hours) {
-  return new Date(Date.now() - days * 24 * 60 * 60000 - (hours || 0) * 60 * 60000).toISOString();
-}
-
-function minutesFromNow(mins) {
-  return new Date(Date.now() + mins * 60000).toISOString();
-}
-
 function formatTime(iso) {
   if (!iso) return "—";
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
@@ -151,104 +130,6 @@ function loadGoogleMapsPlaces() {
     })
     .catch(() => false);
   return mapsLoadPromise;
-}
-
-function seedDeliveries() {
-  const base = Date.now();
-
-  const ongoing = [
-    {
-      id: "DEL-D4E5F6", orderRef: "RX-10241", customerName: "Trevor Lim", customerPhone: "0400 333 444", customerId: "CUST-002",
-      pickupAddress: DEFAULT_PICKUP_ADDRESS, dropoffAddress: "45 Bourke Rd, Alexandria NSW 2015",
-      status: "courier_assigned", fee: 10.9, currency: "AUD",
-      quoteExpiresAt: null, dropoffEta: minutesFromNow(18),
-      courierName: "Priya Kaur", courierPhone: "0433 555 022", trackingUrl: "https://track.uber.com/mock/DEL-D4E5F6",
-      packageNotes: "Temperature-sensitive — insulin", coldChain: true,
-      createdAt: new Date(base - 20 * 60000).toISOString(),
-    },
-    {
-      id: "DEL-G7H8I9", orderRef: "RX-10248", customerName: "Sonia Patel", customerPhone: "0400 555 666", customerId: "CUST-003",
-      pickupAddress: DEFAULT_PICKUP_ADDRESS, dropoffAddress: "8 King St, Rozelle NSW 2039",
-      status: "picked_up", fee: 14.2, currency: "AUD",
-      quoteExpiresAt: null, dropoffEta: minutesFromNow(9),
-      courierName: "Jake Thompson", courierPhone: "0455 555 033", trackingUrl: "https://track.uber.com/mock/DEL-G7H8I9",
-      packageNotes: "2 boxes, no signature required", coldChain: false,
-      createdAt: new Date(base - 15 * 60000).toISOString(),
-    },
-    {
-      id: "DEL-J1K2L3", orderRef: "RX-10250", customerName: "Ben Carter", customerPhone: "0400 777 888", customerId: "CUST-004",
-      pickupAddress: DEFAULT_PICKUP_ADDRESS, dropoffAddress: "3 Church Ave, Marrickville NSW 2204",
-      status: "booked", fee: 11.75, currency: "AUD",
-      quoteExpiresAt: null, dropoffEta: minutesFromNow(35),
-      courierName: null, courierPhone: null, trackingUrl: null,
-      packageNotes: "1 bag", coldChain: false,
-      createdAt: new Date(base - 5 * 60000).toISOString(),
-    },
-  ];
-
-  // Spread across the last two weeks so History/Reports have realistic volume.
-  // { d: days ago, h: hours ago, c: index into CUSTOMER_POOL, status, fee }
-  const historyPlan = [
-    { d: 0, h: 3, c: 0, status: "delivered", fee: 12.5 },
-    { d: 0, h: 6, c: 4, status: "delivered", fee: 9.9 },
-    { d: 1, h: 1, c: 1, status: "delivered", fee: 13.4 },
-    { d: 1, h: 5, c: 7, status: "delivered", fee: 10.2 },
-    { d: 2, h: 2, c: 2, status: "cancelled", fee: 11.0 },
-    { d: 3, h: 1, c: 5, status: "delivered", fee: 15.6 },
-    { d: 3, h: 4, c: 8, status: "delivered", fee: 9.5 },
-    { d: 4, h: 2, c: 3, status: "delivered", fee: 12.9 },
-    { d: 5, h: 1, c: 6, status: "delivered", fee: 14.0 },
-    { d: 6, h: 3, c: 9, status: "delivered", fee: 8.9 },
-    { d: 6, h: 6, c: 0, status: "cancelled", fee: 13.2 },
-    { d: 7, h: 2, c: 1, status: "delivered", fee: 11.4 },
-    { d: 8, h: 1, c: 2, status: "delivered", fee: 16.5 },
-    { d: 9, h: 3, c: 4, status: "delivered", fee: 10.7 },
-    { d: 11, h: 2, c: 6, status: "cancelled", fee: 9.9 },
-    { d: 13, h: 1, c: 8, status: "delivered", fee: 12.3 },
-  ];
-
-  const history = historyPlan.map((row, i) => {
-    const customer = CUSTOMER_POOL[row.c];
-    const createdAt = daysAgoIso(row.d, row.h);
-    const isDelivered = row.status === "delivered";
-    const courier = isDelivered ? COURIER_POOL[i % COURIER_POOL.length] : null;
-    const etaMinutes = 25 + (i % 4) * 5;
-    const idSuffix = i.toString().padStart(2, "0");
-    return {
-      id: "DEL-H" + idSuffix,
-      orderRef: "RX-1" + (3010 + i * 7),
-      customerName: customer.name,
-      customerPhone: customer.phone,
-      customerId: "CUST-" + (row.c + 1).toString().padStart(3, "0"),
-      pickupAddress: DEFAULT_PICKUP_ADDRESS,
-      dropoffAddress: customer.address,
-      status: row.status,
-      fee: row.fee,
-      currency: "AUD",
-      quoteExpiresAt: null,
-      dropoffEta: isDelivered ? new Date(new Date(createdAt).getTime() + etaMinutes * 60000).toISOString() : null,
-      courierName: courier ? courier.name : null,
-      courierPhone: courier ? courier.phone : null,
-      trackingUrl: courier ? "https://track.uber.com/mock/DEL-H" + idSuffix : null,
-      packageNotes: isDelivered ? "1 bag" : "Customer requested cancellation",
-      coldChain: i % 5 === 0,
-      createdAt,
-    };
-  });
-
-  return [...ongoing, ...history];
-}
-
-function seedCustomers() {
-  return CUSTOMER_POOL.map((c, i) => ({
-    id: "CUST-" + (i + 1).toString().padStart(3, "0"),
-    name: c.name,
-    phone: c.phone,
-    address: c.address,
-    notes: "",
-    createdAt: daysAgoIso(20 + i, 0),
-    lastDeliveryAt: null,
-  }));
 }
 
 function StatusBadge({ status }) {
@@ -2003,8 +1884,8 @@ function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvan
 function App() {
   const [section, setSection] = useState("ongoing");
   const [originSection, setOriginSection] = useState("ongoing");
-  const [deliveries, setDeliveries] = useState(seedDeliveries);
-  const [customers, setCustomers] = useState(seedCustomers);
+  const [deliveries, setDeliveries] = useState([]);
+  const [customers, setCustomers] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [banner, setBanner] = useState(null);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
