@@ -1,5 +1,6 @@
 const express = require("express");
 const gosweetspot = require("../providers/gosweetspot");
+const actionStore = require("../storbieActionStore");
 const { respondWithProviderError } = require("./respondWithProviderError");
 
 const router = express.Router();
@@ -42,6 +43,25 @@ router.post("/:trackingNumber/return", async (req, res) => {
     res.status(201).json(shipment);
   } catch (err) {
     respondWithProviderError(res, err, "Could not create a return label right now, please try again.");
+  }
+});
+
+// POST /api/shipping-labels/gosweetspot/pickup — { carrier, consignments?:
+//   string[] (tracking numbers), orderRefs?: string[], totalKg?, parts? }.
+//   orderRefs is purely local bookkeeping — it's how RoutePoint marks which
+//   Storbie orders' labels are now covered by a booked pickup, it's never
+//   sent to GoSweetSpot. See providers/gosweetspot.js for the significant
+//   open caveat: GoSweetSpot's documented carrier list for this endpoint is
+//   NZ-only and has not been confirmed to work for this account's actual
+//   carriers (Aramex, CouriersPlease, TNT).
+router.post("/pickup", async (req, res) => {
+  const { carrier, consignments, orderRefs, totalKg, parts } = req.body || {};
+  try {
+    const booking = await gosweetspot.bookPickup({ carrier, consignments, totalKg, parts });
+    (orderRefs || []).forEach(orderRef => actionStore.markPickupBooked(orderRef));
+    res.json(booking);
+  } catch (err) {
+    respondWithProviderError(res, err, "Could not book a pickup right now, please try again.");
   }
 });
 

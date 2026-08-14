@@ -46,8 +46,32 @@
 //     a fresh quoteId obtained from getRates() for that reversed route.
 //     Revisit if GoSweetSpot support confirms an actual returns-specific
 //     endpoint exists.
+//   POST /api/bookpickup — books a same-day courier pickup. Body: {
+//     Carrier, Consignments?: string[], TotalKg?, Parts? }. Response is
+//     PLAIN TEXT, not JSON (e.g. "Success. Your booking has been accepted.
+//     #NC12345678"), unlike every other endpoint here. There is NO date/
+//     time-window or address field anywhere in this request — it's a
+//     same-day "ping the driver" request against whatever pickup address
+//     is on file in GoSweetSpot's own account settings, not something
+//     controlled per-call from this app.
+//     IMPORTANT — NOT YET CONFIRMED WORKING FOR THIS ACCOUNT'S CARRIERS:
+//     GoSweetSpot's own documented supported-carrier list for this specific
+//     endpoint (Castle Parcels, Post Haste Couriers, New Zealand Couriers,
+//     Mainstream Freight, FedEx, New Zealand Post, First Global Logistics,
+//     TIL Freight) is entirely NZ-market carriers. NONE of the AU carriers
+//     confirmed enabled on this account (Aramex, CouriersPlease, TNT)
+//     appear in that documented list. This has not been live-tested — it
+//     may simply reject with an unsupported-carrier error for every
+//     carrier this account actually uses. Flagged clearly, not resolved.
+//   v2/publishmanifest also exists (batches consignments into a manifest,
+//     returns base64 PDFs) — not wired up here since GoSweetSpot's docs
+//     only call it out as a prerequisite for specific NZ carriers
+//     (Mainstream Freight); nothing suggests the AU carriers on this
+//     account need it before a pickup can be booked. Revisit if bookPickup
+//     ever comes back with a "must manifest first" style error.
 
 const { ProviderError } = require("./errors");
+const { parseAuAddress } = require("../addressUtils");
 
 const BASE_URL = "https://api.gosweetspot.com";
 
@@ -111,32 +135,8 @@ async function gssRequest(path, { method = "GET", body } = {}) {
   return responseBody;
 }
 
-// Parses Storbie's actual address format (confirmed live, not guessed):
-// "Street[, Street line 2], Suburb, Full State Name, Postcode, Australia" —
-// e.g. "32 Egmont Avenue, WARRADALE, South Australia, 5046, Australia".
-// Cleanly comma-delimited by field, and state is spelled out in full (not
-// abbreviated like "SA"), unlike the space-separated "SUBURB STATE
-// POSTCODE" tail Google's formattedAddress uses elsewhere in this app —
-// a different heuristic is needed here since it's a different real source
-// format, not just style preference.
-function parseAuAddress(line) {
-  const parts = String(line || "")
-    .split(",")
-    .map(s => s.trim())
-    .filter(Boolean)
-    .filter(p => p.toLowerCase() !== "australia");
-
-  if (parts.length === 0) return { street: String(line || ""), suburb: "", state: "", postcode: "" };
-
-  const lastIsPostcode = /^\d{4}$/.test(parts[parts.length - 1]);
-  const postcode = lastIsPostcode ? parts[parts.length - 1] : "";
-  const state = lastIsPostcode && parts.length >= 2 ? parts[parts.length - 2] : (parts.length >= 1 ? parts[parts.length - 1] : "");
-  const suburb = lastIsPostcode && parts.length >= 3 ? parts[parts.length - 3] : (parts.length >= 2 ? parts[parts.length - 2] : "");
-  const streetPartsCount = lastIsPostcode ? Math.max(parts.length - 3, 1) : Math.max(parts.length - 2, 1);
-  const street = parts.slice(0, streetPartsCount).join(", ");
-
-  return { street, suburb, state, postcode };
-}
+// parseAuAddress() moved to ../addressUtils.js — shared with
+// providers/starshipit.js, which needs the same two-format handling.
 
 function buildDestination({ name, address, phone, email, instructions }) {
   const parsed = parseAuAddress(address);
@@ -271,4 +271,35 @@ async function createReturnLabel(params) {
   return createLabel({ ...params, orderRef });
 }
 
-module.exports = { getRates, createLabel, getTracking, createReturnLabel };
+// bookPickup — requests a same-day courier pickup for already-created
+// shipments. Generic per carrier, same as everything else here: the caller
+// passes whichever carrier name GoSweetSpot itself returned on the labels
+// being picked up (see normalizeShipment().carrierName / normalizeRate().
+// carrierName), nothing is assumed. See the module header for the
+// significant open caveat: this endpoint's documented carrier support list
+// is NZ-only and has not been confirmed to work for Aramex/CouriersPlease/
+// TNT yet.
+async function bookPickup({ carrier, consignments, totalKg, parts }) {
+  if (!carrier) {
+    throw new ProviderError("carrier is required to book a pickup", {
+      status: 400,
+      code: "INVALID_REQUEST",
+      userMessage: "Please choose which carrier's pickup to book.",
+    });
+  }
+
+  const body = { Carrier: carrier };
+  if (consignments && consignments.length) body.Consignments = consignments;
+  if (totalKg != null) body.TotalKg = totalKg;
+  if (parts != null) body.Parts = parts;
+
+  const result = await gssRequest("/api/bookpickup", { method: "POST", body });
+  const message =
+    typeof result === "string" ? result :
+    result && typeof result.raw === "string" ? result.raw :
+    (result && (result.message || result.Message)) || JSON.stringify(result);
+
+  return { carrier, message, raw: result };
+}
+
+module.exports = { getRates, createLabel, getTracking, createReturnLabel, bookPickup };
