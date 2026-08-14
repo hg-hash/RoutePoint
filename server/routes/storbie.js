@@ -1,6 +1,6 @@
 const express = require("express");
 const storbie = require("../integrations/storbie");
-const auspost = require("../providers/auspost");
+const gosweetspot = require("../providers/gosweetspot");
 const actionStore = require("../storbieActionStore");
 const { respondWithProviderError } = require("./respondWithProviderError");
 
@@ -44,21 +44,36 @@ router.post("/orders/:orderRef/mark-actioned", (req, res) => {
 });
 
 // POST /api/storbie/orders/:orderRef/create-label — { customerName, customerPhone,
-// address, items }. Will create a real Australia Post label once MyPost
-// Business API access is confirmed (see providers/auspost.js — currently a
-// stub). On success, automatically marks the order actioned; on failure
-// (always, for now) nothing is marked, and the frontend sees a clean error.
+// address, quoteId, weight, length, width, height }. quoteId comes from a
+// prior POST /api/shipping-labels/gosweetspot/rates call — staff pick a
+// carrier/service from that comparison first, this books the actual
+// shipment via GoSweetSpot (see providers/gosweetspot.js — generic across
+// whatever carriers are enabled on the account, not hardcoded to Australia
+// Post, which isn't confirmed available on this account yet). On success,
+// marks the order actioned with the real tracking number and whichever
+// carrier was actually used; on failure nothing is marked and the frontend
+// sees a clean error.
 router.post("/orders/:orderRef/create-label", async (req, res) => {
   const { orderRef } = req.params;
-  const { customerName, customerPhone, address, items } = req.body || {};
+  const { customerName, customerPhone, address, quoteId, weight, length, width, height } = req.body || {};
 
   try {
-    const label = await auspost.createLabel({ orderRef, customerName, customerPhone, address, items });
-    const record = actionStore.markActioned(orderRef, {
-      trackingNumber: label.trackingNumber,
-      carrier: "Australia Post",
+    const shipment = await gosweetspot.createLabel({
+      quoteId,
+      destinationName: customerName,
+      destinationAddress: address,
+      destinationPhone: customerPhone,
+      weight,
+      length,
+      width,
+      height,
+      orderRef,
     });
-    res.json({ orderRef, label, routePoint: record });
+    const record = actionStore.markActioned(orderRef, {
+      trackingNumber: shipment.trackingNumber,
+      carrier: shipment.carrierName,
+    });
+    res.json({ orderRef, label: shipment, routePoint: record });
   } catch (err) {
     respondWithProviderError(res, err, "Could not create a label for this order right now.");
   }
