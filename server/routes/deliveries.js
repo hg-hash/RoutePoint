@@ -3,6 +3,7 @@ const { getProvider } = require("../providers/registry");
 const store = require("../store");
 const { respondWithProviderError } = require("./respondWithProviderError");
 const { validateScheduledFor } = require("./scheduling");
+const { getShippingLabelStatus, isShippingLabelProvider } = require("./shippingLabelStatus");
 
 const router = express.Router();
 
@@ -19,6 +20,11 @@ function buildRecord(id, metadata, normalized) {
     pickupAddress: metadata.pickupAddress,
     dropoffAddress: metadata.dropoffAddress,
     provider: metadata.provider,
+    // "manual" = booked directly through New Delivery (Uber/Sherpa) — the
+    // other value in practice is "storbie" (see routes/storbie.js), for
+    // shipping labels created from a Storbie order. Falls back to "manual"
+    // for records written before this field existed.
+    source: metadata.source || "manual",
     status: normalized.status,
     fee: normalized.fee,
     currency: normalized.currency,
@@ -27,12 +33,13 @@ function buildRecord(id, metadata, normalized) {
     courierName: normalized.courierName,
     courierPhone: normalized.courierPhone,
     trackingUrl: normalized.trackingUrl,
+    trackingNumber: metadata.trackingNumber || null,
     packageNotes: metadata.packageNotes,
     coldChain: metadata.coldChain,
     specialInstructions: metadata.specialInstructions || "",
     scheduledFor: metadata.scheduledFor || null,
     createdAt: metadata.createdAt,
-    liveTracking: true,
+    liveTracking: normalized.liveTracking !== undefined ? normalized.liveTracking : true,
   };
 }
 
@@ -101,6 +108,7 @@ router.post("/", async (req, res) => {
       specialInstructions: specialInstructions || "",
       scheduledFor: scheduledFor || null,
       provider: key,
+      source: "manual",
       createdAt: new Date().toISOString(),
     };
     const record = buildRecord(normalized.providerDeliveryId, metadata, normalized);
@@ -130,8 +138,13 @@ router.get("/:id", async (req, res) => {
   }
 
   try {
-    const { module: providerModule } = getProvider(existing.provider);
-    const normalized = await providerModule.getStatus(id);
+    // GoSweetSpot/Starshipit-sourced records (source: "storbie") don't fit
+    // the uber/sherpa getStatus(id) shape at all — see
+    // routes/shippingLabelStatus.js for why this needs its own path rather
+    // than going through providers/registry.js.
+    const normalized = isShippingLabelProvider(existing.provider)
+      ? await getShippingLabelStatus(existing)
+      : await getProvider(existing.provider).module.getStatus(id);
     const record = buildRecord(id, existing, normalized);
     store.saveRecord(id, record);
     res.json(record);

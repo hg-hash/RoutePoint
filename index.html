@@ -36,6 +36,9 @@ const DEFAULT_PICKUP_ADDRESS = "Medicines R Us Pharmacy, Shop 4, 123 High Street
 const STATUS_CONFIG = {
   quoted:           { label: "Quoted",           badge: "bg-slate-200 text-slate-700" },
   booked:           { label: "Booked",           badge: "bg-blue-100 text-blue-700" },
+  // Shipping-label bookings only (source: "storbie") — sits between
+  // "booked" (label created) and courier pickup actually happening.
+  pickup_booked:    { label: "Awaiting Pickup",  badge: "bg-indigo-100 text-indigo-700" },
   courier_assigned: { label: "Courier Assigned", badge: "bg-purple-100 text-purple-700" },
   picked_up:        { label: "Picked Up",        badge: "bg-amber-100 text-amber-800" },
   delivered:        { label: "Delivered",        badge: "bg-green-100 text-green-700" },
@@ -44,6 +47,7 @@ const STATUS_CONFIG = {
 
 const TIMELINE_STEPS = [
   { key: "booked", label: "Booked" },
+  { key: "pickup_booked", label: "Awaiting pickup" },
   { key: "courier_assigned", label: "Courier assigned" },
   { key: "picked_up", label: "Picked up" },
   { key: "delivered", label: "Delivered" },
@@ -178,13 +182,30 @@ const NAV_ITEMS = [
   { key: "storbie", label: "Storbie Orders" },
 ];
 
-const PROVIDER_LABELS = { uber: "Uber Direct", sherpa: "Sherpa" };
+const PROVIDER_LABELS = { uber: "Uber Direct", sherpa: "Sherpa", gosweetspot: "GoSweetSpot", starshipit: "Starshipit" };
 
 function ProviderTag({ provider }) {
   if (!provider || !PROVIDER_LABELS[provider]) return null;
   return (
     <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 whitespace-nowrap">
       via {PROVIDER_LABELS[provider]}
+    </span>
+  );
+}
+
+// Distinguishes HOW a delivery entered the system — same-day courier
+// booking via New Delivery ("manual") vs. a shipping label created from a
+// Storbie order ("storbie") — independent of ProviderTag, which shows
+// WHICH provider/carrier handled it. Only "storbie" renders a tag, same
+// "return null" fallback pattern as ProviderTag, so same-day bookings look
+// exactly as they did before this existed.
+const SOURCE_LABELS = { storbie: "Storbie" };
+
+function SourceTag({ source }) {
+  if (!source || !SOURCE_LABELS[source]) return null;
+  return (
+    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-teal-50 text-teal-700 whitespace-nowrap">
+      via {SOURCE_LABELS[source]}
     </span>
   );
 }
@@ -1057,7 +1078,10 @@ function OngoingDeliveriesTable({ deliveries, onSelect }) {
                       {d.orderRef}
                       {d.coldChain && <span className="text-xs font-bold text-cyan-700">❄</span>}
                     </div>
-                    <ProviderTag provider={d.provider} />
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <ProviderTag provider={d.provider} />
+                      <SourceTag source={d.source} />
+                    </div>
                   </td>
                   <td className="px-5 py-4 text-slate-700">{d.customerName}</td>
                   <td className="px-5 py-4"><StatusBadge status={d.status} /></td>
@@ -1080,7 +1104,56 @@ function OngoingDeliveriesTable({ deliveries, onSelect }) {
   );
 }
 
+const SOURCE_FILTER_TABS = [
+  { key: "all", label: "All" },
+  { key: "manual", label: "Same-day" },
+  { key: "storbie", label: "Storbie shipments" },
+];
+
+// Wraps OngoingDeliveriesTable with a source filter so staff can look at
+// just same-day courier bookings or just Storbie shipping labels — deliveries
+// with no source field yet (records written before this existed) count as
+// "manual", matching buildRecord()'s own fallback server-side.
+function OngoingDeliveriesScreen({ deliveries, onSelect }) {
+  const [sourceFilter, setSourceFilter] = useState("all");
+
+  const filtered = useMemo(() => {
+    if (sourceFilter === "all") return deliveries;
+    return deliveries.filter(d => (d.source || "manual") === sourceFilter);
+  }, [deliveries, sourceFilter]);
+
+  return (
+    <div>
+      <div className="max-w-6xl mx-auto px-4 pt-8">
+        <div className="inline-flex rounded-xl border border-slate-200 bg-white p-1 gap-1">
+          {SOURCE_FILTER_TABS.map(tab => (
+            <button
+              key={tab.key}
+              type="button"
+              onClick={() => setSourceFilter(tab.key)}
+              className={
+                "px-4 py-2 rounded-lg text-sm font-semibold transition-colors " +
+                (sourceFilter === tab.key ? "bg-blue-600 text-white" : "text-slate-600 hover:bg-slate-100")
+              }
+            >
+              {tab.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <OngoingDeliveriesTable deliveries={filtered} onSelect={onSelect} />
+    </div>
+  );
+}
+
 function LabelStatusBadge({ routePoint }) {
+  if (routePoint && routePoint.labelGenerated && routePoint.pickupBooked) {
+    return (
+      <span className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-indigo-100 text-indigo-700 whitespace-nowrap">
+        Awaiting Pickup
+      </span>
+    );
+  }
   if (routePoint && routePoint.labelGenerated) {
     return (
       <span className="inline-flex items-center px-3 py-1.5 rounded-full text-sm font-semibold bg-green-100 text-green-700 whitespace-nowrap">
@@ -1102,9 +1175,10 @@ function itemsSummary(items) {
   return `${items.length} items: ${first} + ${items.length - 1} more`;
 }
 
-function StorbieOrderCard({ order, onPrintLabel }) {
+function StorbieOrderCard({ order, onPrintLabel, onViewDelivery }) {
   const [expanded, setExpanded] = useState(false);
   const needsLabel = !(order.routePoint && order.routePoint.labelGenerated);
+  const awaitingPickup = order.routePoint && order.routePoint.labelGenerated && order.routePoint.pickupBooked;
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6">
@@ -1131,10 +1205,21 @@ function StorbieOrderCard({ order, onPrintLabel }) {
             </button>
           ) : (
             order.routePoint.trackingNumber && (
-              <div className="text-xs text-slate-500 text-right whitespace-nowrap">
-                {order.routePoint.carrier ? order.routePoint.carrier + " · " : ""}
-                {order.routePoint.trackingNumber}
-              </div>
+              <React.Fragment>
+                <div className="text-xs text-slate-500 text-right whitespace-nowrap">
+                  {order.routePoint.carrier ? order.routePoint.carrier + " · " : ""}
+                  {order.routePoint.trackingNumber}
+                </div>
+                {awaitingPickup && onViewDelivery && (
+                  <button
+                    type="button"
+                    onClick={() => onViewDelivery(order.routePoint.trackingNumber)}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 whitespace-nowrap"
+                  >
+                    View in Ongoing Deliveries →
+                  </button>
+                )}
+              </React.Fragment>
             )
           )}
         </div>
@@ -1452,7 +1537,7 @@ function PendingPickupPanel({ orders, onBooked }) {
   );
 }
 
-function StorbieOrdersScreen() {
+function StorbieOrdersScreen({ onViewDelivery, onDeliveriesChanged }) {
   const [orders, setOrders] = useState(null);
   const [error, setError] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -1515,6 +1600,11 @@ function StorbieOrdersScreen() {
                 ? { ...o, routePoint: { ...o.routePoint, pickupBooked: true, pickupBookedAt: new Date().toISOString() } }
                 : o
             ));
+            // The pickup route also flips the linked delivery record's
+            // status server-side (see routes/gosweetspot.js) — refresh so
+            // Ongoing Deliveries picks that up instead of showing stale
+            // "Booked" until a full reload.
+            if (onDeliveriesChanged) onDeliveriesChanged();
           }}
         />
       )}
@@ -1525,6 +1615,7 @@ function StorbieOrdersScreen() {
             key={o.orderRef}
             order={o}
             onPrintLabel={() => setRateModalOrder(o)}
+            onViewDelivery={onViewDelivery}
           />
         ))}
       </div>
@@ -1536,6 +1627,13 @@ function StorbieOrdersScreen() {
           onBooked={routePoint => {
             setOrders(prev => prev.map(o => (o.orderRef === rateModalOrder.orderRef ? { ...o, routePoint } : o)));
             setRateModalOrder(null);
+            // create-label also saves a real record in the main deliveries
+            // store server-side (see routes/storbie.js) — App's own
+            // `deliveries` state has no way to know that happened on its
+            // own, since this screen is a separate component with no
+            // access to it. Without this, "View in Ongoing Deliveries"
+            // would point at a delivery App doesn't know exists yet.
+            if (onDeliveriesChanged) onDeliveriesChanged();
           }}
         />
       )}
@@ -2356,17 +2454,29 @@ function App() {
     deliveriesRef.current = deliveries;
   }, [deliveries]);
 
-  // Repopulate from the backend's persisted store on startup — customers and
-  // deliveries live on disk now (see server/dataStore.js), not just in this
-  // window's memory, so they survive app restarts/rebuilds/reinstalls.
-  useEffect(() => {
-    fetch(`${API_BASE}/deliveries`)
+  // Pulls the full delivery list from the backend's persisted store — the
+  // only way this app learns about deliveries created OUTSIDE the normal
+  // New Delivery flow, e.g. shipping labels booked from the Storbie Orders
+  // screen (a completely separate component with no access to this state).
+  // Exposed to StorbieOrdersScreen via onDeliveriesChanged so it can call
+  // this right after creating a label or booking a pickup, instead of
+  // those real, already-saved records being invisible here until a full
+  // page reload.
+  function refreshDeliveries() {
+    return fetch(`${API_BASE}/deliveries`)
       .then(async response => {
         const body = await parseJsonResponse(response);
         if (!response.ok || !Array.isArray(body)) return;
         setDeliveries(body.map(mapDeliveryRecord));
       })
       .catch(() => {});
+  }
+
+  // Repopulate from the backend's persisted store on startup — customers and
+  // deliveries live on disk now (see server/dataStore.js), not just in this
+  // window's memory, so they survive app restarts/rebuilds/reinstalls.
+  useEffect(() => {
+    refreshDeliveries();
 
     fetch(`${API_BASE}/customers`)
       .then(async response => {
@@ -2578,7 +2688,7 @@ function App() {
       <div className="md:pl-72">
         <MobileTopBar onOpenMenu={() => setMobileNavOpen(true)} />
         {section === "new" && <NewDeliveryForm customers={customers} onBookDelivery={handleBookDelivery} banner={banner} onNavigate={navigate} />}
-        {section === "ongoing" && <OngoingDeliveriesTable deliveries={deliveries} onSelect={id => handleSelect(id, "ongoing")} />}
+        {section === "ongoing" && <OngoingDeliveriesScreen deliveries={deliveries} onSelect={id => handleSelect(id, "ongoing")} />}
         {section === "history" && <DeliveryHistoryTable deliveries={deliveries} onSelect={id => handleSelect(id, "history")} />}
         {section === "customers" && (
           <CustomersScreen
@@ -2591,7 +2701,12 @@ function App() {
         )}
         {section === "reports" && <ReportsScreen deliveries={deliveries} />}
         {section === "settings" && <SettingsScreen />}
-        {section === "storbie" && <StorbieOrdersScreen />}
+        {section === "storbie" && (
+          <StorbieOrdersScreen
+            onViewDelivery={id => handleSelect(id, "ongoing")}
+            onDeliveriesChanged={refreshDeliveries}
+          />
+        )}
         {section === "detail" && (
           <DeliveryDetail
             delivery={selectedDelivery}

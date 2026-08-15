@@ -1,6 +1,7 @@
 const express = require("express");
 const gosweetspot = require("../providers/gosweetspot");
 const actionStore = require("../storbieActionStore");
+const deliveryStore = require("../store");
 const { respondWithProviderError } = require("./respondWithProviderError");
 
 const router = express.Router();
@@ -54,11 +55,22 @@ router.post("/:trackingNumber/return", async (req, res) => {
 //   open caveat: GoSweetSpot's documented carrier list for this endpoint is
 //   NZ-only and has not been confirmed to work for this account's actual
 //   carriers (Aramex, CouriersPlease, TNT).
+//   consignments and orderRefs are parallel arrays (same order, same
+//   length — both built from the same order list on the frontend), so
+//   they're zipped by index here to also flip each linked delivery
+//   record's status to "pickup_booked" in the main deliveries store —
+//   that's what Ongoing Deliveries reads from, not just
+//   storbieActionStore's own pickupBooked flag.
 router.post("/pickup", async (req, res) => {
   const { carrier, consignments, orderRefs, totalKg, parts } = req.body || {};
   try {
     const booking = await gosweetspot.bookPickup({ carrier, consignments, totalKg, parts });
-    (orderRefs || []).forEach(orderRef => actionStore.markPickupBooked(orderRef));
+    (orderRefs || []).forEach((orderRef, i) => {
+      actionStore.markPickupBooked(orderRef);
+      const trackingNumber = (consignments || [])[i];
+      const existing = trackingNumber && deliveryStore.getRecord(trackingNumber);
+      if (existing) deliveryStore.saveRecord(trackingNumber, { ...existing, status: "pickup_booked" });
+    });
     res.json(booking);
   } catch (err) {
     respondWithProviderError(res, err, "Could not book a pickup right now, please try again.");

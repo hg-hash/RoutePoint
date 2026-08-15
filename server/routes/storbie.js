@@ -3,6 +3,8 @@ const storbie = require("../integrations/storbie");
 const gosweetspot = require("../providers/gosweetspot");
 const starshipit = require("../providers/starshipit");
 const actionStore = require("../storbieActionStore");
+const deliveryStore = require("../store");
+const settingsStore = require("../settingsStore");
 const { respondWithProviderError } = require("./respondWithProviderError");
 
 const LABEL_PROVIDERS = { gosweetspot, starshipit };
@@ -57,10 +59,21 @@ router.post("/orders/:orderRef/mark-actioned", (req, res) => {
 // normal provider error, not a crash. On success, marks the order actioned
 // with the real tracking number and whichever carrier was actually used;
 // on failure nothing is marked and the frontend sees a clean error.
+//
+// Also creates a real entry in the main deliveries store (server/store.js),
+// same shape Uber/Sherpa deliveries use, so this shipment shows up in
+// Ongoing Deliveries too instead of being siloed on the Storbie Orders
+// screen with no pickup-status visibility. Keyed by trackingNumber (the
+// connote) — that's what routes/shipping-labels/gosweetspot's pickup
+// endpoint also has on hand, so it can find and update this same record
+// once a pickup is booked (see routes/gosweetspot.js). liveTracking is
+// only turned on for GoSweetSpot — Starshipit's getTracking() isn't
+// implemented yet, so polling it would just fail repeatedly.
 router.post("/orders/:orderRef/create-label", async (req, res) => {
   const { orderRef } = req.params;
   const { provider, customerName, customerPhone, address, quoteId, weight, length, width, height } = req.body || {};
-  const labelProvider = LABEL_PROVIDERS[provider] || LABEL_PROVIDERS.gosweetspot;
+  const providerKey = LABEL_PROVIDERS[provider] ? provider : "gosweetspot";
+  const labelProvider = LABEL_PROVIDERS[providerKey];
 
   try {
     const shipment = await labelProvider.createLabel({
@@ -78,6 +91,36 @@ router.post("/orders/:orderRef/create-label", async (req, res) => {
       trackingNumber: shipment.trackingNumber,
       carrier: shipment.carrierName,
     });
+
+    if (shipment.trackingNumber) {
+      deliveryStore.saveRecord(shipment.trackingNumber, {
+        id: shipment.trackingNumber,
+        orderRef,
+        customerName,
+        customerPhone,
+        customerId: null,
+        pickupAddress: settingsStore.getPickupAddress(),
+        dropoffAddress: address,
+        provider: providerKey,
+        source: "storbie",
+        status: "booked",
+        fee: shipment.cost != null ? shipment.cost : null,
+        currency: "AUD",
+        quoteExpiresAt: null,
+        dropoffEta: null,
+        courierName: shipment.carrierName || null,
+        courierPhone: null,
+        trackingUrl: shipment.trackingUrl || null,
+        trackingNumber: shipment.trackingNumber,
+        packageNotes: "",
+        coldChain: false,
+        specialInstructions: "",
+        scheduledFor: null,
+        createdAt: new Date().toISOString(),
+        liveTracking: providerKey === "gosweetspot",
+      });
+    }
+
     res.json({ orderRef, label: shipment, routePoint: record });
   } catch (err) {
     respondWithProviderError(res, err, "Could not create a label for this order right now.");
