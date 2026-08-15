@@ -302,4 +302,44 @@ async function bookPickup({ carrier, consignments, totalKg, parts }) {
   return { carrier, message, raw: result };
 }
 
-module.exports = { getRates, createLabel, getTracking, createReturnLabel, bookPickup };
+// cancelShipment — deletes an unprocessed consignment. Confirmed from
+// GoSweetSpot's own docs (api-docs.gosweetspot.com/docs/shipments/
+// delete.html): DELETE /api/shipments?id=<connote>, comma-separated for
+// multiple (max 50), same access_key/site_id auth as everything else.
+// Response is a JSON object mapping each connote to an outcome string —
+// GoSweetSpot's docs list the possible values as "Invalid ticket number",
+// "Already deleted", "Already delivered", "Already in transit", and
+// "Already manifested", all of which mean it CANNOT be deleted (only a
+// genuinely unprocessed consignment can be). A shipment whose pickup has
+// already been booked is quite likely to already be manifested — this
+// doesn't pre-guess that though, it calls the real endpoint and reports
+// back whatever GoSweetSpot actually says, rather than assuming success or
+// failure ahead of time.
+async function cancelShipment(trackingNumber) {
+  const result = await gssRequest(`/api/shipments?id=${encodeURIComponent(trackingNumber)}`, { method: "DELETE" });
+
+  // Response shape is a plain object keyed by connote — be lenient about
+  // exact casing/structure since this hasn't been live-tested yet (no
+  // deletable test shipment existed at the time this was written).
+  const outcome =
+    (result && typeof result === "object" && (result[trackingNumber] || Object.values(result)[0])) ||
+    (typeof result === "string" ? result : null);
+
+  const outcomeText = String(outcome || "").toLowerCase();
+  const cancelled = outcomeText.length > 0 && !/already|invalid/.test(outcomeText);
+
+  if (!cancelled) {
+    throw new ProviderError(`GoSweetSpot would not delete shipment ${trackingNumber}: ${JSON.stringify(result)}`, {
+      status: 409,
+      code: "CANNOT_CANCEL",
+      userMessage: outcome
+        ? `GoSweetSpot says this shipment can't be cancelled: "${outcome}". It's likely already been manifested or picked up.`
+        : "GoSweetSpot didn't confirm this shipment was cancelled. It may already be manifested or picked up.",
+      details: result,
+    });
+  }
+
+  return { cancelled: true, message: outcome, raw: result };
+}
+
+module.exports = { getRates, createLabel, getTracking, createReturnLabel, bookPickup, cancelShipment };

@@ -331,4 +331,19 @@ async function createReturnLabel() {
   );
 }
 
-module.exports = { getRates, createLabel, getTracking, createReturnLabel };
+// cancelShipment — NOT YET IMPLEMENTED, same reason as createLabel(): no
+// Starshipit shipment can currently be created in the first place, so
+// there's nothing real to verify a cancel endpoint against yet either.
+async function cancelShipment() {
+  throw new ProviderError(
+    "Starshipit shipment cancellation is not yet wired up — no Starshipit label can be created yet either (see " +
+      "createLabel() above), so there's nothing to verify a cancel endpoint against.",
+    {
+      status: 501,
+      code: "NOT_IMPLEMENTED",
+      userMessage: "Starshipit cancellation isn't finished yet.",
+    }
+  );
+}
+
+module.exports = { getRates, createLabel, getTracking, createReturnLabel, cancelShipment };

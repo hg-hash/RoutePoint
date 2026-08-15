@@ -43,4 +43,27 @@ async function getShippingLabelStatus(existing) {
   };
 }
 
-module.exports = { getShippingLabelStatus, isShippingLabelProvider };
+// Cancels the underlying shipment with the provider — see
+// providers/gosweetspot.js's cancelShipment() for the real endpoint and
+// its limitations (e.g. an already-manifested shipment can't be deleted;
+// this surfaces GoSweetSpot's own real reason as a normal provider error
+// rather than silently no-op'ing). Starshipit's is deliberately
+// NOT_IMPLEMENTED (see providers/starshipit.js) since no Starshipit label
+// can be created yet either.
+async function cancelShippingLabel(existing) {
+  const providerModule = SHIPPING_LABEL_PROVIDERS[existing.provider];
+  await providerModule.cancelShipment(existing.trackingNumber);
+
+  return {
+    status: "cancelled",
+    fee: existing.fee,
+    currency: existing.currency,
+    dropoffEta: existing.dropoffEta,
+    courierName: existing.courierName,
+    courierPhone: existing.courierPhone,
+    trackingUrl: existing.trackingUrl,
+    liveTracking: existing.liveTracking,
+  };
+}
+
+module.exports = { getShippingLabelStatus, cancelShippingLabel, isShippingLabelProvider };

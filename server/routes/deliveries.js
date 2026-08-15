@@ -3,7 +3,7 @@ const { getProvider } = require("../providers/registry");
 const store = require("../store");
 const { respondWithProviderError } = require("./respondWithProviderError");
 const { validateScheduledFor } = require("./scheduling");
-const { getShippingLabelStatus, isShippingLabelProvider } = require("./shippingLabelStatus");
+const { getShippingLabelStatus, cancelShippingLabel, isShippingLabelProvider } = require("./shippingLabelStatus");
 
 const router = express.Router();
 
@@ -163,8 +163,11 @@ router.post("/:id/cancel", async (req, res) => {
   }
 
   try {
-    const { module: providerModule } = getProvider(existing.provider);
-    const normalized = await providerModule.cancelDelivery(id);
+    // Same split as GET /:id above — a shipping-label-sourced record needs
+    // its own cancel path, not providers/registry.js's uber/sherpa one.
+    const normalized = isShippingLabelProvider(existing.provider)
+      ? await cancelShippingLabel(existing)
+      : await getProvider(existing.provider).module.cancelDelivery(id);
     const record = buildRecord(id, existing, normalized);
     store.saveRecord(id, record);
     res.json(record);
