@@ -211,56 +211,119 @@ function buildPackages({ weight, length, width, height }) {
   }];
 }
 
-function isAusPost(rate) {
-  const label = `${rate.carrier || rate.carrier_name || ""} ${rate.carrier_service || rate.service_name || ""}`;
-  return AUSPOST_NAME_PATTERN.test(label);
+// Matches on the CARRIER identity ONLY (carrier / carrier_name), never on
+// the service name. /api/deliveryservices always returns both carrier
+// ("MyPostBusiness") and carrier_name ("MyPost Business") — spec-confirmed
+// in the Delivery Services - Service Model, and verified live against this
+// account.
+//
+// The previous version fell through to service_name when no carrier field
+// was present. That fallback is deliberately GONE: real MyPost service
+// names are "Parcel Post" / "Express Post", which contain neither
+// "auspost" nor "mypost", so the fallback silently dropped 4 of every 5
+// genuine options (measured) instead of failing visibly. A service with no
+// carrier field is now treated as not-AusPost rather than being guessed at
+// from its service name.
+function isAusPost(service) {
+  const carrier = `${service.carrier || ""} ${service.carrier_name || ""}`.trim();
+  if (!carrier) return false;
+  return AUSPOST_NAME_PATTERN.test(carrier);
 }
 
-function normalizeRate(r) {
+// Starshipit returns the ETA inside pricing_breakdown under a key with a
+// TRAILING SPACE ("Predicted Delivery Dates ") — matched case-insensitively
+// by prefix rather than hardcoded, so a future fix to that typo on
+// Starshipit's side doesn't silently blank the ETA out.
+function pickEta(service) {
+  const pb = service.pricing_breakdown;
+  if (!pb || typeof pb !== "object") return null;
+  const key = Object.keys(pb).find(k => /predicted delivery/i.test(k));
+  return key ? String(pb[key]).trim() : null;
+}
+
+function normalizeRate(s) {
   return {
-    // No dedicated quote/rate id confirmed in Starshipit's rates response
-    // (see header) — carrying the raw shipping_method/service identifiers
-    // through so createLabel() has something to reference once that gap
-    // is resolved.
-    carrierName: r.carrier || r.carrier_name || "Australia Post",
-    service: r.carrier_service || r.service_name || r.shipping_method || null,
-    cost: r.total_price != null ? r.total_price : r.price,
-    serviceStandard: r.delivery_time || r.eta || null,
-    raw: r,
+    carrierName: s.carrier_name || s.carrier || "Australia Post",
+    carrierCode: s.carrier || null,
+    service: s.service_name || null,
+    // service_code (e.g. "B30" Parcel Post, "BE1PB1" Parcel Post Flat Rate
+    // Box Small) is the carrier's real product code. This is the field
+    // createLabel() will need to pin a shipment to a specific AusPost
+    // product — it resolves the "how do we select AusPost" question the
+    // module header flagged as unconfirmed, since the code comes straight
+    // back from the carrier rather than being guessed.
+    serviceCode: s.service_code || null,
+    cost: s.total_price != null ? s.total_price : s.price,
+    serviceStandard: pickEta(s),
+    raw: s,
   };
 }
 
-// getRates — requests rates generically (no carrier forced — see header
-// for why: whether a request can even force a specific carrier is
-// unconfirmed) and filters the response down to Australia Post/MyPost
-// Business options only, since that's the only carrier this module is
-// scoped to. If AusPost isn't linked in the Starshipit dashboard yet, or
-// this account has no couriers configured at all, this correctly comes
-// back empty rather than erroring.
+// getRates — quotes live Australia Post / MyPost Business services.
 //
-// Request/response shape below is LIVE-CONFIRMED (not guessed): POST
-// /api/rates initially rejected an "order: {...}" wrapper (that's the
-// Create Order shape, not this endpoint's) with "destination object is
-// required", then rejected "country": "Australia" with "country_code
-// parameter value is required". The corrected shape — order_number/
-// destination/packages at the top level, country_code as a 2-letter ISO
-// code — returns HTTP 200 with { rates: [...], success: true|false,
-// errors: [...] }.
+// ENDPOINT: POST /api/deliveryservices (NOT /api/rates).
 //
-// IMPORTANT: Starshipit returns HTTP 200 even when success is false (e.g.
-// a validation error) — checking response.ok alone silently swallowed a
-// real validation error as "zero rates" here until this was caught via a
-// live test. success is checked explicitly below so a genuine request
-// error surfaces as an error, not as an empty, AusPost-not-linked-looking
-// result.
+// This was changed after a live diagnosis. /api/rates is Starshipit's
+// CHECKOUT-rates endpoint: it returns only rates configured under
+// Settings > Checkout Rates in the dashboard, which is a separate piece of
+// configuration from linking a courier account. With MyPost Business fully
+// linked and quoting, /api/rates still returned {"rates":[],"success":true}
+// for every payload tried — correct behaviour for that endpoint, but not
+// what this app wants. /api/deliveryservices returns the live services from
+// linked courier accounts, which is the actual goal. Verified live: the
+// identical payload returns [] on /api/rates and 20 priced MyPost Business
+// services on /api/deliveryservices.
+//
+// Both endpoints are current (the deprecated one is GET /api/rates, not the
+// POST) — confirmed against Starshipit's own OpenAPI collection at
+// support.starshipit.com/developers/api-reference/starshipit/reference.json,
+// which is the machine-readable source behind the JS-rendered reference the
+// module header notes couldn't be fetched.
+//
+// SENDER/ORIGIN: deliberately not sent. The spec states the account's
+// Pickup Address from Settings is used when `sender` is omitted, and
+// sending it explicitly changed nothing in testing.
+//
+// !! FLAG — UNRESOLVED, NOT A CODE ISSUE: the pickup address configured on
+// the Starshipit account is "11-12/211 Buckwell Drive, Hassall Grove NSW
+// 2761", NOT Gregory Hills. Every quote this function returns is priced
+// FROM Hassall Grove. If Gregory Hills is the real dispatch point, the fix
+// is in the Starshipit dashboard (Settings > Pickup Address), not here.
+// Left as-is pending confirmation of which address is correct.
+//
+// UNITS (spec-confirmed): weight in KILOGRAMS, dimensions in METRES —
+// cmToM() below is correct. Dimensions are nullable; weight is required.
+//
+// IMPORTANT: Starshipit returns HTTP 200 even when success is false, so
+// response.ok alone is not enough — result.success is checked explicitly.
 async function getRates({ destinationName, destinationAddress, destinationPhone, destinationEmail, weight, length, width, height, orderRef }) {
+  // Weight is required by Starshipit. Previously an absent weight produced
+  // `packages: [{}]` — buildPackages() maps missing values to undefined and
+  // JSON.stringify drops undefined keys, emptying the object entirely —
+  // which came back as a confusing "Incorrect package weight parameter
+  // value" from the API. Fail here instead, with a message naming the field
+  // that is actually missing.
+  const parsedWeight = parseFloat(weight);
+  if (!Number.isFinite(parsedWeight) || parsedWeight <= 0) {
+    throw new ProviderError(
+      `Starshipit requires a package weight in kg to quote (got ${JSON.stringify(weight)})`,
+      {
+        status: 400,
+        code: "WEIGHT_REQUIRED",
+        userMessage: "Please enter a parcel weight before checking Australia Post rates.",
+      }
+    );
+  }
+
   const body = {
-    order_number: orderRef,
     destination: buildDestination({ name: destinationName, address: destinationAddress, phone: destinationPhone, email: destinationEmail }),
-    packages: buildPackages({ weight, length, width, height }),
+    packages: buildPackages({ weight: parsedWeight, length, width, height }),
+    // Without this, total_price comes back absent — pricing is opt-in on
+    // this endpoint (defaults to false per the spec).
+    include_pricing: true,
   };
 
-  const result = await ssRequest("/api/rates", { method: "POST", body });
+  const result = await ssRequest("/api/deliveryservices", { method: "POST", body });
 
   if (result.success === false) {
     throw new ProviderError(`Starshipit rejected the rates request: ${JSON.stringify(result.errors)}`, {
@@ -271,9 +334,22 @@ async function getRates({ destinationName, destinationAddress, destinationPhone,
     });
   }
 
-  const allRates = result.rates || result.Rates || result.services || [];
-  const available = allRates.filter(isAusPost).map(normalizeRate);
-  return { available, rejected: [] };
+  const allServices = result.services || [];
+  const available = allServices.filter(isAusPost).map(normalizeRate);
+
+  // Non-AusPost services are reported rather than silently discarded, so
+  // "no AusPost options" stays distinguishable from "nothing came back at
+  // all" — the exact ambiguity that made the original empty-rates problem
+  // hard to diagnose. Plain Label lands here, as it should.
+  const rejected = allServices
+    .filter(s => !isAusPost(s))
+    .map(s => ({
+      carrierName: s.carrier_name || s.carrier || "unknown",
+      service: s.service_name || null,
+      reason: "not Australia Post / MyPost Business",
+    }));
+
+  return { available, rejected };
 }
 
 // createLabel — NOT YET IMPLEMENTED. See the module header: the exact
