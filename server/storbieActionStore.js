@@ -21,6 +21,10 @@ function defaultStatus() {
     labelGeneratedAt: null,
     trackingNumber: null,
     carrier: null,
+    // Absolute path to the saved label PDF, when the carrier returned PDF
+    // bytes rather than a hosted label. Lets the Storbie card reopen the
+    // label without rebooking (a reprint is chargeable).
+    labelPath: null,
     pickupBooked: false,
     pickupBookedAt: null,
   };
@@ -30,7 +34,7 @@ function getActionStatus(orderRef) {
   return actioned[orderRef] || defaultStatus();
 }
 
-function markActioned(orderRef, { trackingNumber, carrier } = {}) {
+function markActioned(orderRef, { trackingNumber, carrier, labelPath } = {}) {
   const existing = actioned[orderRef] || defaultStatus();
   const record = {
     ...existing,
@@ -38,6 +42,7 @@ function markActioned(orderRef, { trackingNumber, carrier } = {}) {
     labelGeneratedAt: new Date().toISOString(),
     trackingNumber: trackingNumber || null,
     carrier: carrier || null,
+    labelPath: labelPath || existing.labelPath || null,
   };
   actioned = { ...actioned, [orderRef]: record };
   persist();

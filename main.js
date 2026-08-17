@@ -1,7 +1,8 @@
 const path = require("path");
 const http = require("http");
 const { spawn } = require("child_process");
-const { app, BrowserWindow, Menu } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, shell } = require("electron");
+const labelStore = require("./server/labelStore");
 
 const PORT = 4000;
 const HEALTH_URL = `http://localhost:${PORT}/api/health`;
@@ -101,6 +102,7 @@ async function createWindow() {
     autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
+      preload: path.join(__dirname, "preload.js"),
     },
   });
 
@@ -116,6 +118,25 @@ async function createWindow() {
     mainWindow = null;
   });
 }
+
+// Opens a saved shipping-label PDF in the OS default viewer, on behalf of
+// the renderer (which has no Electron access of its own — see preload.js).
+//
+// Carrier labels come back as PDF bytes rather than URLs, so the backend
+// writes them to ~/.routepoint/labels and the renderer holds only the path.
+// That path arrives here over IPC, so it is NOT trusted: labelStore
+// re-resolves it and refuses anything that isn't a real file inside the
+// labels directory, which keeps this from becoming a general "open any file
+// on this machine" primitive.
+ipcMain.handle("routepoint:open-label", async (_event, labelPath) => {
+  if (!labelStore.isLabelPath(labelPath)) {
+    return { ok: false, error: "Not a saved label file." };
+  }
+
+  // openPath resolves to "" on success, or a non-empty error string.
+  const problem = await shell.openPath(labelPath);
+  return problem ? { ok: false, error: problem } : { ok: true };
+});
 
 Menu.setApplicationMenu(null);
 

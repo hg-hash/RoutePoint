@@ -5,6 +5,7 @@ const starshipit = require("../providers/starshipit");
 const actionStore = require("../storbieActionStore");
 const deliveryStore = require("../store");
 const settingsStore = require("../settingsStore");
+const labelStore = require("../labelStore");
 const { respondWithProviderError } = require("./respondWithProviderError");
 
 const LABEL_PROVIDERS = { gosweetspot, starshipit };
@@ -92,6 +93,35 @@ router.post("/orders/:orderRef/create-label", async (req, res) => {
       carrier: shipment.carrierName,
     });
 
+    // Starshipit returns the label as a base64 PDF rather than a URL, so
+    // write the bytes to ~/.routepoint/labels and keep the PATH on the
+    // record. That's what makes the label reopenable later without
+    // rebooking (a reprint is a real, chargeable action). Failing to write
+    // the file must not lose the booking — the shipment already exists at
+    // the carrier by this point — so this is best-effort and the error is
+    // surfaced on the response instead of thrown.
+    let labelPath = null;
+    let labelError = null;
+    if (shipment.labelBase64) {
+      try {
+        labelPath = labelStore.saveLabel({
+          orderNumber: orderRef,
+          trackingNumber: shipment.trackingNumber,
+          base64: shipment.labelBase64,
+        });
+      } catch (writeErr) {
+        labelError = writeErr.message;
+      }
+    }
+
+    if (labelPath) {
+      actionStore.markActioned(orderRef, {
+        trackingNumber: shipment.trackingNumber,
+        carrier: shipment.carrierName,
+        labelPath,
+      });
+    }
+
     if (shipment.trackingNumber) {
       deliveryStore.saveRecord(shipment.trackingNumber, {
         id: shipment.trackingNumber,
@@ -112,16 +142,21 @@ router.post("/orders/:orderRef/create-label", async (req, res) => {
         courierPhone: null,
         trackingUrl: shipment.trackingUrl || null,
         trackingNumber: shipment.trackingNumber,
+        // Absolute path to the saved PDF. Null for providers that hand back
+        // a hosted label instead of bytes (GoSweetSpot prints directly).
+        labelPath,
         packageNotes: "",
         coldChain: false,
         specialInstructions: "",
         scheduledFor: null,
         createdAt: new Date().toISOString(),
-        liveTracking: providerKey === "gosweetspot",
+        // Both providers now have a working getTracking(), so live status
+        // polling is no longer GoSweetSpot-only.
+        liveTracking: true,
       });
     }
 
-    res.json({ orderRef, label: shipment, routePoint: record });
+    res.json({ orderRef, label: { ...shipment, labelBase64: undefined }, labelPath, labelError, routePoint: record });
   } catch (err) {
     respondWithProviderError(res, err, "Could not create a label for this order right now.");
   }

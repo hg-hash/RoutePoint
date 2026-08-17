@@ -23,6 +23,7 @@
     "includeSubNodeModules": true,
     "files": [
       "main.js",
+      "preload.js",
       "index.html",
       "assets/**/*",
       "server/**/*",

@@ -253,6 +253,12 @@ function normalizeRate(s) {
     // module header flagged as unconfirmed, since the code comes straight
     // back from the carrier rather than being guessed.
     serviceCode: s.service_code || null,
+    // Composite id so this provider slots into the existing quote-then-book
+    // flow unchanged (routes/storbie.js create-label and the frontend both
+    // pass a single opaque quoteId). Starshipit has no server-side quote to
+    // reference — Print Label takes carrier + carrier_service_code directly —
+    // so the "quote" IS that pair, encoded here and parsed in createLabel().
+    quoteId: s.carrier && s.service_code ? `${s.carrier}:${s.service_code}` : null,
     cost: s.total_price != null ? s.total_price : s.price,
     serviceStandard: pickEta(s),
     raw: s,
@@ -284,12 +290,13 @@ function normalizeRate(s) {
 // Pickup Address from Settings is used when `sender` is omitted, and
 // sending it explicitly changed nothing in testing.
 //
-// !! FLAG — UNRESOLVED, NOT A CODE ISSUE: the pickup address configured on
-// the Starshipit account is "11-12/211 Buckwell Drive, Hassall Grove NSW
-// 2761", NOT Gregory Hills. Every quote this function returns is priced
-// FROM Hassall Grove. If Gregory Hills is the real dispatch point, the fix
-// is in the Starshipit dashboard (Settings > Pickup Address), not here.
-// Left as-is pending confirmation of which address is correct.
+// PICKUP ADDRESS — RESOLVED: the Starshipit account's pickup address is
+// "11-12/211 Buckwell Drive, Hassall Grove NSW 2761", and that is the
+// correct dispatch point (confirmed by the pharmacy). Earlier references to
+// Gregory Hills were mistaken. Every quote and label from this module is
+// therefore priced and collected FROM Hassall Grove, which is intended —
+// no code change needed, and nothing here should be "fixed" to point at
+// Gregory Hills.
 //
 // UNITS (spec-confirmed): weight in KILOGRAMS, dimensions in METRES —
 // cmToM() below is correct. Dimensions are nullable; weight is required.
@@ -352,53 +359,253 @@ async function getRates({ destinationName, destinationAddress, destinationPhone,
   return { available, rejected };
 }
 
-// createLabel — NOT YET IMPLEMENTED. See the module header: the exact
-// print/label endpoint and the exact mechanism for pinning a request to
-// Australia Post specifically are both unconfirmed from Starshipit's
-// documentation, and this account has neither a working subscription key
-// nor AusPost linked in the Starshipit dashboard to verify against yet.
-// Throws deliberately rather than guessing a request shape that could
-// silently misfire once real credentials exist — this account is
-// production with no sandbox, so a wrong guess here risks a real,
-// possibly wrong, billable label.
-async function createLabel() {
-  throw new ProviderError(
-    "Starshipit label creation is not yet wired up — the print/label endpoint and AusPost carrier-selection " +
-      "mechanism are unconfirmed from Starshipit's docs (see providers/starshipit.js header). Needs a live " +
-      "verification pass once STARSHIPIT_SUBSCRIPTION_KEY is set and MyPost Business is linked in the Starshipit " +
-      "dashboard — explicitly stop and confirm before that pass creates any real label.",
-    {
-      status: 501,
-      code: "NOT_IMPLEMENTED",
-      userMessage: "Starshipit label creation isn't finished yet — rates only for now.",
-    }
-  );
+// Split a composite quoteId ("MyPostBusiness:B30") back into the carrier and
+// carrier_service_code that Print Label needs. Callers may instead pass
+// carrierCode/serviceCode explicitly; both routes end up here.
+function resolveService({ quoteId, carrierCode, serviceCode }) {
+  let carrier = carrierCode || null;
+  let service = serviceCode || null;
+
+  if ((!carrier || !service) && typeof quoteId === "string" && quoteId.includes(":")) {
+    const idx = quoteId.indexOf(":");
+    carrier = carrier || quoteId.slice(0, idx);
+    service = service || quoteId.slice(idx + 1);
+  }
+
+  if (!carrier || !service) {
+    throw new ProviderError(
+      `Starshipit needs a carrier and service code to book (got quoteId=${JSON.stringify(quoteId)}, carrierCode=${JSON.stringify(carrierCode)}, serviceCode=${JSON.stringify(serviceCode)})`,
+      {
+        status: 400,
+        code: "INVALID_REQUEST",
+        userMessage: "Please choose a shipping option from the rate comparison first.",
+      }
+    );
+  }
+  return { carrier, service };
 }
 
-// getTracking — NOT YET IMPLEMENTED, same reason as createLabel(): the
-// exact tracking endpoint path isn't confirmed from Starshipit's docs.
-async function getTracking() {
-  throw new ProviderError(
-    "Starshipit tracking is not yet wired up — the tracking endpoint path is unconfirmed from Starshipit's docs " +
-      "(see providers/starshipit.js header). Needs a live verification pass once real credentials are in place.",
-    {
-      status: 501,
-      code: "NOT_IMPLEMENTED",
-      userMessage: "Starshipit tracking isn't finished yet.",
-    }
-  );
+// Create Order's destination model uses `country` as a FULL NAME
+// ("Australia"), unlike /api/deliveryservices which rejected that and
+// required a 2-letter `country_code`. Same account, same address, two
+// different shapes — hence a separate builder rather than reusing
+// buildDestination(). Both are taken from Starshipit's own documented
+// request models, not guessed.
+function buildOrderDestination({ name, address, phone, email, instructions }) {
+  const parsed = parseAuAddress(address);
+  return {
+    name,
+    email: email || "",
+    phone: phone || "",
+    street: parsed.street,
+    suburb: parsed.suburb,
+    state: parsed.state,
+    post_code: parsed.postcode,
+    country: "Australia",
+    delivery_instructions: instructions || "",
+  };
 }
 
-// createReturnLabel — NOT YET IMPLEMENTED, blocked on the same
-// createLabel() gap above. Once createLabel() is confirmed, this should be
-// a much smaller change than GoSweetSpot's equivalent: Starshipit's own
-// docs consistently describe a `return_order: true` flag on the same
-// Create Order call (Starshipit swaps sender/destination itself), not a
-// second quote-and-swap round trip.
+function normalizeShipment(printBody, { carrier, service, orderId, orderNumber }) {
+  const trackingNumber = (printBody.tracking_numbers || [])[0] || null;
+  const labels = printBody.labels || [];
+  return {
+    carrierName: printBody.carrier_name || carrier || "Australia Post",
+    carrierCode: carrier || null,
+    serviceCode: service || null,
+    trackingNumber,
+    // Starshipit has no tracking URL on the print response — it comes back
+    // from GET /api/track instead (see getTracking()). Left null rather than
+    // fabricating a carrier URL from the tracking number.
+    trackingUrl: null,
+    // NOTE: Starshipit returns labels as base64-encoded PDF strings, NOT as
+    // hosted URLs. There is no label URL to return. The PDF bytes are handed
+    // back here and written to disk by the caller (routes/storbie.js) so the
+    // app has something durable to open/print.
+    labelBase64: labels[0] || null,
+    labelCount: labels.length,
+    labelTypes: printBody.label_types || [],
+    orderId: orderId != null ? orderId : printBody.order_id,
+    orderNumber: printBody.order_number || orderNumber || null,
+    cost: null,
+    errors: printBody.errors || [],
+    raw: printBody,
+  };
+}
+
+// createLabel — books a REAL, BILLABLE Australia Post shipment.
+//
+// TWO Starshipit calls, in order:
+//   1. POST /api/orders           -> creates an UNSHIPPED order, returns order_id.
+//                                    Free and reversible (DELETE /api/orders/delete).
+//   2. POST /api/orders/shipment  -> prints the label against that order_id.
+//                                    THIS is the real, chargeable step.
+//
+// Both paths are from Starshipit's own OpenAPI collection, not guessed —
+// which closes the "exact print/label path is unconfirmed" gap the module
+// header opened. The carrier-selection question is closed the same way:
+// Print Label takes carrier + carrier_service_code explicitly, and both come
+// straight off the rate the user picked, so nothing is inferred.
+//
+// !! COST WARNING — this account is production with no sandbox, and MyPost
+// Business charges at LABEL CREATION, not at lodgement (confirmed with the
+// pharmacy). Step 2 therefore spends real money the moment it succeeds, and
+// that spend is UNRECOVERABLE: Starshipit exposes no void/cancel/unprint
+// operation for a printed label (see cancelShipment() below), so there is no
+// way to undo it from code. Only call this for a shipment that is actually
+// being dispatched. Step 1 is free and is cleaned up automatically if step 2
+// fails, so a failed booking costs nothing.
+async function createLabel({
+  quoteId, carrierCode, serviceCode,
+  destinationName, destinationAddress, destinationPhone, destinationEmail, destinationInstructions,
+  weight, length, width, height, orderRef, items,
+}) {
+  const { carrier, service } = resolveService({ quoteId, carrierCode, serviceCode });
+
+  const parsedWeight = parseFloat(weight);
+  if (!Number.isFinite(parsedWeight) || parsedWeight <= 0) {
+    throw new ProviderError(`Starshipit requires a package weight in kg to book (got ${JSON.stringify(weight)})`, {
+      status: 400,
+      code: "WEIGHT_REQUIRED",
+      userMessage: "Please enter a parcel weight before booking this label.",
+    });
+  }
+
+  const packages = buildPackages({ weight: parsedWeight, length, width, height });
+
+  // --- Step 1: create the unshipped order -------------------------------
+  const orderBody = {
+    order: {
+      order_number: orderRef,
+      reference: orderRef,
+      destination: buildOrderDestination({
+        name: destinationName,
+        address: destinationAddress,
+        phone: destinationPhone,
+        email: destinationEmail,
+        instructions: destinationInstructions,
+      }),
+      packages,
+      items: (items || []).map(i => ({
+        description: i.name || i.description || "Item",
+        sku: i.sku || "",
+        quantity: i.quantity != null ? i.quantity : 1,
+      })),
+    },
+  };
+
+  const created = await ssRequest("/api/orders", { method: "POST", body: orderBody });
+  if (created.success === false) {
+    throw new ProviderError(`Starshipit rejected the order creation: ${JSON.stringify(created.errors)}`, {
+      status: 400,
+      code: "API_REQUEST_FAILED",
+      userMessage: "Starshipit could not create this order. Please check the address and try again.",
+      details: created.errors,
+    });
+  }
+
+  const orderId = created.order && created.order.order_id;
+  if (!orderId) {
+    throw new ProviderError(`Starshipit created an order with no order_id: ${JSON.stringify(created)}`, {
+      status: 502,
+      code: "API_REQUEST_FAILED",
+      userMessage: "Starshipit did not return an order reference. Please try again.",
+    });
+  }
+
+  // --- Step 2: print the label (REAL, CHARGEABLE) -----------------------
+  let printed;
+  try {
+    printed = await ssRequest("/api/orders/shipment", {
+      method: "POST",
+      body: { order_id: orderId, carrier, carrier_service_code: service, packages, reprint: false },
+    });
+  } catch (err) {
+    // The order exists but has no label. Leaving it behind would silently
+    // litter the Starshipit account with unshipped orders on every failed
+    // booking, so clean it up — best-effort, and never mask the real error.
+    try {
+      await ssRequest("/api/orders/delete", { method: "DELETE", body: { order_id: orderId } });
+    } catch (cleanupErr) {
+      err.message += ` (note: could not clean up unshipped order ${orderId}: ${cleanupErr.message})`;
+    }
+    throw err;
+  }
+
+  if (printed.success === false) {
+    try {
+      await ssRequest("/api/orders/delete", { method: "DELETE", body: { order_id: orderId } });
+    } catch (_) { /* cleanup is best-effort; the print error below is what matters */ }
+    throw new ProviderError(`Starshipit rejected the label print: ${JSON.stringify(printed.errors)}`, {
+      status: 400,
+      code: "API_REQUEST_FAILED",
+      userMessage: "Starshipit could not print a label for this shipment. Please try again.",
+      details: printed.errors,
+    });
+  }
+
+  return normalizeShipment(printed, { carrier, service, orderId, orderNumber: orderRef });
+}
+
+function normalizeTracking(body) {
+  // The documented sample returns `results` as a single object; the field is
+  // described as a list. Handle both rather than assuming one.
+  const raw = body.results;
+  const r = Array.isArray(raw) ? (raw[0] || {}) : (raw || {});
+  return {
+    trackingNumber: r.tracking_number || null,
+    trackingUrl: r.tracking_url || null,
+    carrierName: r.carrier_name || null,
+    carrierService: r.carrier_service || null,
+    status: r.tracking_status || null,
+    orderStatus: r.order_status || null,
+    orderNumber: r.order_number || null,
+    shipmentDate: r.shipment_date || null,
+    lastUpdated: r.last_updated_date || null,
+    events: (r.tracking_events || []).map(e => ({
+      at: e.event_datetime || null,
+      status: e.status || null,
+      details: e.details || null,
+    })),
+    raw: body,
+  };
+}
+
+// getTracking — status + event history for one tracking number, via
+// GET /api/track. Path confirmed from Starshipit's OpenAPI collection,
+// closing the second "unconfirmed path" gap from the module header.
+async function getTracking(trackingNumber) {
+  if (!trackingNumber) {
+    throw new ProviderError("A tracking number is required to look up Starshipit tracking", {
+      status: 400,
+      code: "INVALID_REQUEST",
+      userMessage: "No tracking number to look up for this shipment.",
+    });
+  }
+
+  const result = await ssRequest(`/api/track?tracking_number=${encodeURIComponent(trackingNumber)}`);
+
+  if (result.success === false) {
+    throw new ProviderError(`Starshipit rejected the tracking lookup: ${JSON.stringify(result.errors)}`, {
+      status: 400,
+      code: "API_REQUEST_FAILED",
+      userMessage: "Could not fetch tracking for this shipment right now.",
+      details: result.errors,
+    });
+  }
+
+  return normalizeTracking(result);
+}
+
+// createReturnLabel — still NOT IMPLEMENTED, deliberately out of scope.
+// Now unblocked in principle (Create Order takes return_order: true and
+// Starshipit swaps the addresses itself), but booking returns against a
+// production account is a separate decision that hasn't been made.
 async function createReturnLabel() {
   throw new ProviderError(
-    "Starshipit return labels are not yet wired up — blocked on the same unconfirmed label-creation endpoint as " +
-      "createLabel() (see providers/starshipit.js header).",
+    "Starshipit return labels are not wired up yet. Create Order documents a return_order flag, so this is a " +
+      "small change — but it books a real return against a production account, so it needs an explicit decision " +
+      "first rather than arriving as a side effect of the outbound-label work.",
     {
       status: 501,
       code: "NOT_IMPLEMENTED",
@@ -407,19 +614,61 @@ async function createReturnLabel() {
   );
 }
 
-// cancelShipment — NOT YET IMPLEMENTED, same reason as createLabel(): no
-// Starshipit shipment can currently be created in the first place, so
-// there's nothing real to verify a cancel endpoint against yet either.
-async function cancelShipment() {
-  throw new ProviderError(
-    "Starshipit shipment cancellation is not yet wired up — no Starshipit label can be created yet either (see " +
-      "createLabel() above), so there's nothing to verify a cancel endpoint against.",
-    {
-      status: 501,
-      code: "NOT_IMPLEMENTED",
-      userMessage: "Starshipit cancellation isn't finished yet.",
-    }
-  );
+// cancelShipment — deletes an UNSHIPPED Starshipit order.
+//
+// IMPORTANT LIMITATION, confirmed against the full endpoint list rather than
+// assumed: Starshipit's API has NO void/cancel operation for a label that has
+// already been printed. DELETE /api/orders/delete is documented as "Delete an
+// unshipped order" only. There is no unprint endpoint (the only "unprint"
+// strings in the whole spec are order-count fields), and no void/cancel
+// endpoint of any kind. The closest post-print operation is Replace Shipment
+// ("redo a printed or shipped order"), which creates a NEW order rather than
+// cancelling the carrier's label.
+//
+// So: a printed AusPost label must be voided in the Starshipit dashboard or
+// the MyPost Business portal, NOT here. This function throws a clear error
+// saying so rather than silently no-oping and letting a caller believe a real
+// label was cancelled.
+async function cancelShipment(orderId) {
+  if (!orderId) {
+    throw new ProviderError("A Starshipit order_id is required to delete an unshipped order", {
+      status: 400,
+      code: "INVALID_REQUEST",
+      userMessage: "Nothing to cancel for this shipment.",
+    });
+  }
+
+  const numericId = parseInt(orderId, 10);
+  if (!Number.isFinite(numericId)) {
+    throw new ProviderError(
+      `Starshipit cancellation takes the numeric order_id, not a tracking number (got ${JSON.stringify(orderId)}). ` +
+        "A printed label cannot be cancelled via the API at all — void it in the Starshipit dashboard or the " +
+        "MyPost Business portal.",
+      {
+        status: 400,
+        code: "INVALID_REQUEST",
+        userMessage: "This shipment can't be cancelled automatically — please void it in Starshipit.",
+      }
+    );
+  }
+
+  const result = await ssRequest("/api/orders/delete", { method: "DELETE", body: { order_id: numericId } });
+
+  if (result.success === false) {
+    throw new ProviderError(
+      `Starshipit refused to delete order ${numericId}: ${JSON.stringify(result.errors)}. This usually means the ` +
+        "order has already been printed/shipped — printed labels must be voided in the Starshipit dashboard or " +
+        "the MyPost Business portal.",
+      {
+        status: 400,
+        code: "API_REQUEST_FAILED",
+        userMessage: "This shipment couldn't be cancelled automatically — please void it in Starshipit.",
+        details: result.errors,
+      }
+    );
+  }
+
+  return { cancelled: true, orderId: numericId, raw: result };
 }
 
 module.exports = { getRates, createLabel, getTracking, createReturnLabel, cancelShipment };

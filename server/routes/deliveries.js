@@ -34,6 +34,10 @@ function buildRecord(id, metadata, normalized) {
     courierPhone: normalized.courierPhone,
     trackingUrl: normalized.trackingUrl,
     trackingNumber: metadata.trackingNumber || null,
+    // Absolute path to a saved label PDF, when the provider returned bytes
+    // rather than a hosted label. The renderer passes this back over IPC to
+    // be opened with shell.openPath (see preload.js / main.js).
+    labelPath: metadata.labelPath || null,
     packageNotes: metadata.packageNotes,
     coldChain: metadata.coldChain,
     specialInstructions: metadata.specialInstructions || "",

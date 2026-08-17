@@ -65,6 +65,25 @@ function formatTime(iso) {
   return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+// Short, human destination for the booking confirmation — "Old Guildford"
+// rather than the full comma-separated address. Mirrors the suburb rule in
+// server/addressUtils.js: drop the trailing "Australia", and if the last
+// segment is a bare 4-digit postcode the suburb sits two segments before it.
+// Falls back to the trimmed address so the confirmation is never blank.
+function destinationSuburb(address) {
+  const parts = String(address || "")
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean)
+    .filter(p => p.toLowerCase() !== "australia");
+  if (parts.length === 0) return "this address";
+  const last = parts[parts.length - 1];
+  if (/^\d{4}$/.test(last) && parts.length >= 3) return parts[parts.length - 3];
+  const tail = last.match(/^(.*)\s+[A-Za-z]{2,3}\s+\d{4}$/);
+  if (tail) return tail[1].trim();
+  return parts.length >= 2 ? parts[1] : parts[0];
+}
+
 function formatMoney(fee, currency) {
   return new Intl.NumberFormat("en-AU", { style: "currency", currency: currency || "AUD" }).format(fee);
 }
@@ -1210,6 +1229,16 @@ function StorbieOrderCard({ order, onPrintLabel, onViewDelivery }) {
                   {order.routePoint.carrier ? order.routePoint.carrier + " · " : ""}
                   {order.routePoint.trackingNumber}
                 </div>
+                {order.routePoint.labelPath && (
+                  <button
+                    type="button"
+                    onClick={() => window.routepoint && window.routepoint.openLabel(order.routePoint.labelPath)}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 whitespace-nowrap"
+                    title={order.routePoint.labelPath}
+                  >
+                    Open label PDF
+                  </button>
+                )}
                 {awaitingPickup && onViewDelivery && (
                   <button
                     type="button"
@@ -1263,9 +1292,12 @@ function StorbieOrderCard({ order, onPrintLabel, onViewDelivery }) {
 // Australia Post/MyPost Business only (see providers/starshipit.js) —
 // clearly labeled so it's obvious which option is actually AusPost. Either
 // provider's rates simply don't appear if that provider isn't configured
-// (missing API key) — same graceful fallback used elsewhere. Starshipit
-// label creation isn't wired up yet, so its rate rows show a disabled
-// note instead of a working "Book this" button. Kept deliberately simple
+// (missing API key) — same graceful fallback used elsewhere. Booking is a
+// two-step click: "Book this" only stages a choice, and a separate explicit
+// confirm actually creates the label. That guard is deliberate — MyPost
+// Business charges at label creation, not at lodgement, and Starshipit
+// exposes no way to void a printed label, so a stray click spends real,
+// unrecoverable money. Kept deliberately simple
 // (a plain list, not the New Delivery form's fuller quote-card styling)
 // since this is a secondary, occasional flow.
 function ShippingRateModal({ order, onClose, onBooked }) {
@@ -1278,6 +1310,9 @@ function ShippingRateModal({ order, onClose, onBooked }) {
   const [ratesError, setRatesError] = useState(null);
   const [bookingQuoteId, setBookingQuoteId] = useState(null);
   const [bookError, setBookError] = useState(null);
+  // The rate staged for confirmation. Nothing is sent to the server until
+  // the operator confirms this specific one — see the cost note above.
+  const [pendingRate, setPendingRate] = useState(null);
 
   async function fetchProviderRates(provider) {
     const dims = {
@@ -1327,6 +1362,7 @@ function ShippingRateModal({ order, onClose, onBooked }) {
 
   async function handleBook(rate) {
     setBookError(null);
+    setPendingRate(null);
     setBookingQuoteId(rate.quoteId);
     try {
       const response = await fetch(`${API_BASE}/storbie/orders/${encodeURIComponent(order.orderRef)}/create-label`, {
@@ -1348,6 +1384,18 @@ function ShippingRateModal({ order, onClose, onBooked }) {
       if (!response.ok) {
         setBookError(body.message || "Could not create a label for this order right now.");
         return;
+      }
+      // Carrier labels arrive as PDF bytes, not a URL — the backend has
+      // already written the file, so hand the path to the main process to
+      // open in the OS viewer. Never fatal: the path stays on the record and
+      // can be reopened from the order card.
+      if (body.labelPath && window.routepoint && window.routepoint.openLabel) {
+        const opened = await window.routepoint.openLabel(body.labelPath);
+        if (!opened || !opened.ok) {
+          setBookError("Label saved to " + body.labelPath + " but it couldn't be opened automatically.");
+        }
+      } else if (body.labelError) {
+        setBookError("Shipment booked, but the label PDF couldn't be saved: " + body.labelError);
       }
       onBooked(body.routePoint);
     } catch {
@@ -1401,36 +1449,79 @@ function ShippingRateModal({ order, onClose, onBooked }) {
           <p className="text-sm text-slate-500 mb-3">No carriers available for this address right now.</p>
         )}
 
+        {pendingRate && (
+          <div className="mb-4 border border-amber-300 bg-amber-50 rounded-xl p-4">
+            <p className="text-sm font-semibold text-slate-900 mb-1">
+              {`Book ${pendingRate.service || pendingRate.carrierName} to ${destinationSuburb(order.address)} for ${formatMoney(pendingRate.cost, "AUD")}?`}
+            </p>
+            <p className="text-sm text-amber-800 mb-3">
+              This charges immediately and cannot be voided.
+            </p>
+            <dl className="text-xs text-slate-600 space-y-0.5 mb-3">
+              <div className="flex gap-2">
+                <dt className="w-20 shrink-0 font-semibold">Carrier</dt>
+                <dd>{pendingRate.carrierName}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="w-20 shrink-0 font-semibold">Service</dt>
+                <dd>{pendingRate.service || "—"}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="w-20 shrink-0 font-semibold">Price</dt>
+                <dd>{formatMoney(pendingRate.cost, "AUD")}</dd>
+              </div>
+              <div className="flex gap-2">
+                <dt className="w-20 shrink-0 font-semibold">To</dt>
+                <dd className="break-words">{order.address}</dd>
+              </div>
+            </dl>
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => handleBook(pendingRate)}
+                disabled={bookingQuoteId !== null}
+                className={
+                  "px-4 py-2 rounded-lg font-semibold text-sm transition-colors " +
+                  (bookingQuoteId !== null ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-red-600 text-white hover:bg-red-700")
+                }
+              >
+                Confirm and charge
+              </button>
+              <button
+                type="button"
+                onClick={() => setPendingRate(null)}
+                disabled={bookingQuoteId !== null}
+                className="px-4 py-2 rounded-lg font-semibold text-sm text-slate-600 hover:text-slate-900"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
+
         {rates && rates.length > 0 && (
           <ul className="space-y-2 mb-4">
             {rates.map(r => {
-              const isStarshipit = r.provider === "starshipit";
               return (
                 <li key={`${r.provider}-${r.quoteId}`} className="flex items-center justify-between gap-3 border border-slate-200 rounded-xl px-4 py-3">
                   <div className="min-w-0">
                     <div className="font-semibold text-slate-900">
-                      {isStarshipit ? "Starshipit — Australia Post" : r.carrierName}
+                      {r.carrierName}
                       {r.service ? ` — ${r.service}` : ""}
                     </div>
                     <div className="text-sm text-slate-500">{formatMoney(r.cost, "AUD")}</div>
                   </div>
-                  {isStarshipit ? (
-                    <span className="text-xs text-slate-400 whitespace-nowrap shrink-0" title="Label creation for Starshipit isn't wired up yet — see providers/starshipit.js">
-                      Booking not available yet
-                    </span>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => handleBook(r)}
-                      disabled={bookingQuoteId !== null}
-                      className={
-                        "px-4 py-2 rounded-lg font-semibold text-sm whitespace-nowrap shrink-0 transition-colors " +
-                        (bookingQuoteId !== null ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-700")
-                      }
-                    >
-                      {bookingQuoteId === r.quoteId ? "Booking…" : "Book this"}
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => { setBookError(null); setPendingRate(r); }}
+                    disabled={bookingQuoteId !== null}
+                    className={
+                      "px-4 py-2 rounded-lg font-semibold text-sm whitespace-nowrap shrink-0 transition-colors " +
+                      (bookingQuoteId !== null ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-700")
+                    }
+                  >
+                    {bookingQuoteId === r.quoteId ? "Booking…" : "Book this"}
+                  </button>
                 </li>
               );
             })}
