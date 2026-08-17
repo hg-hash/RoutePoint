@@ -1547,16 +1547,46 @@ function ShippingRateModal({ order, onClose, onBooked }) {
 // carriers (Castle Parcels, Post Haste, NZ Couriers, Mainstream, FedEx, NZ
 // Post, First Global, TIL Freight) as supported for /api/bookpickup, none
 // of which match Aramex/CouriersPlease/TNT.
-function PendingPickupPanel({ orders, onBooked }) {
+function PendingPickupPanel({ orders, onBooked, onDismissed }) {
   const [bookingCarrier, setBookingCarrier] = useState(null);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
+  const [dismissingCarrier, setDismissingCarrier] = useState(null);
+
+  // Clears a row from this list and nothing else. No carrier call is made:
+  // the shipment stays booked and any real pickup is untouched. This exists
+  // because GoSweetSpot has no pickup-cancellation API, so a row that will
+  // never be collected would otherwise be stuck here permanently.
+  async function handleDismiss(carrier, group) {
+    setError(null);
+    setResult(null);
+    setDismissingCarrier(carrier);
+    try {
+      const refs = group.orders.map(o => o.orderRef);
+      const responses = await Promise.all(refs.map(ref =>
+        fetch(`${API_BASE}/storbie/orders/${encodeURIComponent(ref)}/dismiss-pickup`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+        })
+      ));
+      if (responses.some(r => !r.ok)) {
+        setError("Could not clear every label from the list. Please try again.");
+        return;
+      }
+      setResult(`Cleared ${refs.length} label${refs.length === 1 ? "" : "s"} from this list. The shipment and any booked pickup are unchanged.`);
+      onDismissed(refs);
+    } catch {
+      setError("Could not reach the delivery server. Please check it's running and try again.");
+    } finally {
+      setDismissingCarrier(null);
+    }
+  }
 
   const groups = useMemo(() => {
     const byCarrier = new Map();
     orders.forEach(o => {
       const rp = o.routePoint;
-      if (!rp || !rp.labelGenerated || rp.pickupBooked) return;
+      if (!rp || !rp.labelGenerated || rp.pickupBooked || rp.pickupDismissed) return;
       const carrier = rp.carrier || "Unknown carrier";
       if (!byCarrier.has(carrier)) byCarrier.set(carrier, []);
       byCarrier.get(carrier).push(o);
@@ -1597,9 +1627,15 @@ function PendingPickupPanel({ orders, onBooked }) {
   return (
     <div className="mb-6 bg-amber-50 border border-amber-200 rounded-2xl px-5 py-4">
       <h2 className="font-bold text-slate-900 mb-1">Pending pickup</h2>
+      <p className="text-sm text-slate-600 mb-2">
+        Labels created but not yet covered by a booked pickup. GoSweetSpot's pickup-booking API documents NZ carriers
+        only (CastleParcel, PostHaste, NZCouriers, Mainstream, FedEx, NZPost, FirstGlobal), so booking may be refused
+        for Aramex, CouriersPlease and TNT.
+      </p>
       <p className="text-sm text-slate-600 mb-3">
-        Labels created but not yet covered by a booked pickup. Not confirmed to work for every carrier below yet —
-        GoSweetSpot's pickup-booking API documents NZ carrier support only.
+        <span className="font-semibold">A booked pickup can't be cancelled from RoutePoint.</span> GoSweetSpot exposes
+        no pickup-cancellation endpoint — to call one off, contact the carrier or GoSweetSpot support directly.
+        "Clear from list" below only removes the row here; it does not cancel the shipment or any pickup.
       </p>
       <div className="space-y-2">
         {groups.map(({ carrier, orders: group }) => (
@@ -1608,17 +1644,33 @@ function PendingPickupPanel({ orders, onBooked }) {
               <span className="font-semibold text-slate-900">{carrier}</span>
               <span className="text-slate-500"> — {group.length} label{group.length === 1 ? "" : "s"} queued</span>
             </div>
-            <button
-              type="button"
-              onClick={() => handleBookPickup(carrier, { orders: group })}
-              disabled={bookingCarrier !== null}
-              className={
-                "px-4 py-2 rounded-lg font-semibold text-sm whitespace-nowrap transition-colors " +
-                (bookingCarrier !== null ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-amber-600 text-white hover:bg-amber-700")
-              }
-            >
-              {bookingCarrier === carrier ? "Booking…" : "Book pickup"}
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => handleDismiss(carrier, { orders: group })}
+                disabled={bookingCarrier !== null || dismissingCarrier !== null}
+                title="Removes this row from the list only. Does not cancel the shipment or any booked pickup."
+                className={
+                  "px-3 py-2 rounded-lg font-semibold text-sm whitespace-nowrap transition-colors " +
+                  (bookingCarrier !== null || dismissingCarrier !== null
+                    ? "text-slate-400 cursor-not-allowed"
+                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-100")
+                }
+              >
+                {dismissingCarrier === carrier ? "Clearing…" : "Clear from list"}
+              </button>
+              <button
+                type="button"
+                onClick={() => handleBookPickup(carrier, { orders: group })}
+                disabled={bookingCarrier !== null || dismissingCarrier !== null}
+                className={
+                  "px-4 py-2 rounded-lg font-semibold text-sm whitespace-nowrap transition-colors " +
+                  (bookingCarrier !== null || dismissingCarrier !== null ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-amber-600 text-white hover:bg-amber-700")
+                }
+              >
+                {bookingCarrier === carrier ? "Booking…" : "Book pickup"}
+              </button>
+            </div>
           </div>
         ))}
       </div>
@@ -1696,6 +1748,16 @@ function StorbieOrdersScreen({ onViewDelivery, onDeliveriesChanged }) {
             // Ongoing Deliveries picks that up instead of showing stale
             // "Booked" until a full reload.
             if (onDeliveriesChanged) onDeliveriesChanged();
+          }}
+          onDismissed={dismissedOrderRefs => {
+            // Local display state only — no delivery record changes, so no
+            // onDeliveriesChanged() refresh here. The shipment and any
+            // booked pickup are deliberately untouched.
+            setOrders(prev => prev.map(o =>
+              dismissedOrderRefs.includes(o.orderRef)
+                ? { ...o, routePoint: { ...o.routePoint, pickupDismissed: true, pickupDismissedAt: new Date().toISOString() } }
+                : o
+            ));
           }}
         />
       )}

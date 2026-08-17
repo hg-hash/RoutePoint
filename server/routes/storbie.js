@@ -49,6 +49,25 @@ router.post("/orders/:orderRef/mark-actioned", (req, res) => {
   res.json({ orderRef, routePoint: record });
 });
 
+// POST /api/storbie/orders/:orderRef/dismiss-pickup — removes a label from
+// the Pending Pickup list. LOCAL STATE ONLY: it does not cancel the
+// shipment, does not cancel a pickup, and makes no carrier call whatsoever.
+// GoSweetSpot exposes no pickup-cancellation endpoint (POST /api/bookpickup
+// is the only pickup operation they document), so without this a queued row
+// that will never be collected has no way to be cleared.
+router.post("/orders/:orderRef/dismiss-pickup", (req, res) => {
+  const { orderRef } = req.params;
+  const record = actionStore.dismissPickup(orderRef);
+  res.json({ orderRef, routePoint: record });
+});
+
+// POST /api/storbie/orders/:orderRef/restore-pickup — undoes the above.
+router.post("/orders/:orderRef/restore-pickup", (req, res) => {
+  const { orderRef } = req.params;
+  const record = actionStore.undismissPickup(orderRef);
+  res.json({ orderRef, routePoint: record });
+});
+
 // POST /api/storbie/orders/:orderRef/create-label — { provider?, customerName,
 // customerPhone, address, quoteId, weight, length, width, height }. quoteId
 // comes from a prior rates call against the SAME provider (either

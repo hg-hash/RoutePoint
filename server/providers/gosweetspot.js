@@ -369,6 +369,25 @@ async function bookPickup({ carrier, consignments, totalKg, parts }) {
     result && typeof result.raw === "string" ? result.raw :
     (result && (result.message || result.Message)) || JSON.stringify(result);
 
+  // This endpoint answers in PLAIN TEXT and returns HTTP 200 even when it
+  // refuses the booking, so gssRequest's non-2xx check alone never fires and
+  // every response previously counted as success. That silently marked
+  // orders "pickup booked" when nothing had been booked at all — including
+  // for carriers GoSweetSpot's own docs don't support on this endpoint
+  // (the documented list is NZ-only: CastleParcel, PostHaste, NZCouriers,
+  // Mainstream, FedEx, NZPost, FirstGlobal — Aramex, CouriersPlease and TNT
+  // are absent). A documented success reads "Success. Your booking has been
+  // accepted. #NC12345678", so success is required explicitly rather than
+  // assumed.
+  if (!/success/i.test(message)) {
+    throw new ProviderError(`GoSweetSpot did not accept the pickup booking for ${carrier}: ${message}`, {
+      status: 400,
+      code: "PICKUP_NOT_BOOKED",
+      userMessage: `GoSweetSpot didn't accept a pickup booking for ${carrier}: ${message}`,
+      details: result,
+    });
+  }
+
   return { carrier, message, raw: result };
 }
 

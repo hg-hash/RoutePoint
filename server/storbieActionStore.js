@@ -27,6 +27,14 @@ function defaultStatus() {
     labelPath: null,
     pickupBooked: false,
     pickupBookedAt: null,
+    // Local-only: staff dismissing a label from the Pending Pickup list.
+    // Purely a display concern — it does NOT cancel the shipment, does not
+    // cancel any pickup, and never calls the carrier. It exists because
+    // GoSweetSpot has no pickup-cancellation API (see providers/
+    // gosweetspot.js's bookPickup), so a queued row that will never be
+    // picked up otherwise sits there forever with no way to clear it.
+    pickupDismissed: false,
+    pickupDismissedAt: null,
   };
 }
 
@@ -60,4 +68,23 @@ function markPickupBooked(orderRef) {
   return record;
 }
 
-module.exports = { getActionStatus, markActioned, markPickupBooked };
+// Clears a label from the Pending Pickup list WITHOUT touching the carrier.
+// Local state only: the shipment and any real pickup are entirely unaffected.
+// Reversible via undismissPickup() so a mistaken dismiss isn't permanent.
+function dismissPickup(orderRef) {
+  const existing = actioned[orderRef] || defaultStatus();
+  const record = { ...existing, pickupDismissed: true, pickupDismissedAt: new Date().toISOString() };
+  actioned = { ...actioned, [orderRef]: record };
+  persist();
+  return record;
+}
+
+function undismissPickup(orderRef) {
+  const existing = actioned[orderRef] || defaultStatus();
+  const record = { ...existing, pickupDismissed: false, pickupDismissedAt: null };
+  actioned = { ...actioned, [orderRef]: record };
+  persist();
+  return record;
+}
+
+module.exports = { getActionStatus, markActioned, markPickupBooked, dismissPickup, undismissPickup };
