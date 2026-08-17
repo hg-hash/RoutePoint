@@ -145,6 +145,10 @@ router.post("/orders/:orderRef/create-label", async (req, res) => {
         // Absolute path to the saved PDF. Null for providers that hand back
         // a hosted label instead of bytes (GoSweetSpot prints directly).
         labelPath,
+        // Starshipit reprints by numeric order_id rather than by tracking
+        // number, so keep it — without it, reopening a label has to resolve
+        // the id from the order number first.
+        providerOrderId: shipment.orderId != null ? shipment.orderId : null,
         packageNotes: "",
         coldChain: false,
         specialInstructions: "",

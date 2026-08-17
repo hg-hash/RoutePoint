@@ -34,11 +34,13 @@
 //     explicitly; this was caught live (a country-field mistake was
 //     silently returning "zero rates" instead of a visible error until
 //     this check was added).
-//   - With a valid request against this account today: rates: [] with
-//     success: true. That means either no couriers are configured on this
-//     Starshipit account at all, or AusPost specifically isn't linked yet
-//     (see the dashboard-linking requirement below) — genuinely not
-//     distinguishable from the rates response alone. Still open.
+//   - RESOLVED: /api/rates returned rates: [] with success: true for every
+//     valid payload, which looked like "no couriers configured" but wasn't.
+//     /api/rates is Starshipit's CHECKOUT-rates endpoint and only returns
+//     rates configured under Settings > Checkout Rates. The live services
+//     from linked courier accounts come from POST /api/deliveryservices,
+//     which returns 20 priced MyPost Business services for the identical
+//     payload. getRates() uses that endpoint — see its comment.
 //
 // CONFIRMED FROM DOCS (support.starshipit.com articles, consistently
 // repeated across multiple independent pages — not guessed):
@@ -70,45 +72,37 @@
 //     sender, and your own account pickup address becomes the return
 //     destination) — simpler than GoSweetSpot's manual-swap model.
 //
-// NOT CONFIRMED — genuinely unresolved, flagged rather than guessed as
-// fact (see createLabel()/getTracking() below for how each is handled):
-//   - The exact path/shape for the PRINT/LABEL step. Multiple independent
-//     secondary sources referred to a distinct "Create Label" operation
-//     returning a base64 label, separate from Create Order (Starshipit's
-//     own "Update orders before printing" article confirms orders are
-//     created first, unprinted, then printed as a distinct later step) —
-//     but no source gave a concrete, repeated exact path, and single-
-//     mention path guesses ("/api/orders/printlabel", "/api/orders/label")
-//     showed up inconsistently across searches, which reads as summarizer
-//     noise rather than a confirmed real string. NOT hardcoded here as
-//     fact.
-//   - The exact path for the tracking-details lookup — same situation.
-//   - How Australia Post / MyPost Business specifically gets selected as
-//     the carrier for a request. One (single, unrepeated) source showed a
-//     "carrier": "AusPost" field in a create-order example; a more
-//     specific community support post explicitly states the opposite —
-//     that carrier/carrier_name/carrier_service_code CANNOT be passed via
-//     the API at all, only shipping_method/shipping_description strings
-//     that get mapped to a carrier via rules configured in the Starshipit
-//     dashboard. These directly contradict each other and neither could be
-//     independently verified. getRates() below sidesteps this for the
-//     rates step by not forcing a carrier at all — it requests rates
-//     generically and filters the response for whatever comes back
-//     labelled Australia Post / MyPost Business, so it works either way.
-//     createLabel() still needs this resolved before it can reliably
-//     target AusPost specifically — see below.
+// PREVIOUSLY UNCONFIRMED — NOW RESOLVED from Starshipit's own OpenAPI
+// collection at
+// support.starshipit.com/developers/api-reference/starshipit/reference.json.
+// That file is the machine-readable source behind the JS-rendered reference
+// this header notes couldn't be fetched, and it settled all three of the
+// open questions with exact paths rather than secondary-source guesses:
+//   - PRINT/LABEL step: POST /api/orders/shipment (singular). Takes
+//     order_id + carrier + carrier_service_code + packages, returns
+//     tracking_numbers and labels as base64 PDF strings. Orders are created
+//     unshipped via POST /api/orders first, exactly as the support article
+//     described. See createLabel().
+//   - LABEL REPRINT: POST /api/orders/shipments (plural), which takes only
+//     order_ids + reprint and therefore cannot create a shipment. See
+//     fetchLabel() — and read its comment before touching it, because the
+//     singular/plural distinction is the difference between a free reopen
+//     and a real charge.
+//   - TRACKING: GET /api/track. See getTracking().
+//   - CARRIER SELECTION: settled in favour of the source that said carrier
+//     CAN be passed. Print Label takes carrier and carrier_service_code
+//     explicitly, and both come straight off the rate the operator picked
+//     (getRates() carries service_code through), so nothing is inferred
+//     from shipping_method strings or dashboard rules.
 //
-// Given the unresolved items above, and this account having neither a
-// working subscription key nor AusPost linked in the Starshipit dashboard
-// yet, createLabel() intentionally throws a clear "not yet confirmed"
-// error rather than guessing a request shape that could silently create
-// the wrong thing (or nothing) once real credentials are in place. This
-// keeps the module honest about what's actually verified vs. assumed, and
-// means it's structurally impossible for this module to create a real,
-// billable label until that gap is closed deliberately, not by accident.
-// Revisit once GOSWEETSPOT-style live testing is possible here (real
-// subscription key + AusPost linked + explicit go-ahead per the "STOP
-// before any real label" instruction this module was built under).
+// STILL NOT LIVE-VERIFIED: no Starshipit label has ever been created on
+// this account, so createLabel(), getTracking() and fetchLabel() have not
+// been exercised against a real shipment. MyPost Business charges at LABEL
+// CREATION, not at lodgement, and Starshipit exposes no void/cancel/unprint
+// for a printed label — so the first real booking is deliberately gated on
+// an explicitly named order rather than being something this module will
+// ever do incidentally. cancelShipment() covers only unshipped orders and
+// says so.
 
 const { ProviderError } = require("./errors");
 const { parseAuAddress } = require("../addressUtils");
@@ -597,6 +591,68 @@ async function getTracking(trackingNumber) {
   return normalizeTracking(result);
 }
 
+// fetchLabel — retrieves the label for an ALREADY-PRINTED order. This is a
+// read, not a booking: it never creates a shipment and never charges.
+//
+// WHY THIS ENDPOINT: Starshipit has no GET-label endpoint at all (verified
+// against the full endpoint list). The only two label sources are
+// POST /api/orders/shipment (singular) and POST /api/orders/shipments
+// (plural). The SINGULAR one is the chargeable print call — it takes
+// carrier, carrier_service_code and packages, and creates a shipment. The
+// PLURAL one takes ONLY order_ids and reprint, with no carrier, service or
+// package fields, so it is structurally incapable of creating a shipment;
+// with reprint: true it "returns labels previously generated for the
+// printed order". That is why this uses the plural endpoint. Do not
+// "simplify" it onto the singular one — that would turn a free reopen into
+// a real charge.
+//
+// NOT YET LIVE-VERIFIED: no Starshipit label has ever been created on this
+// account, so there has been nothing to reprint. The shape below is from
+// Starshipit's own OpenAPI collection. Verify it on the first real
+// Starshipit label before relying on it.
+async function fetchLabel({ orderId, orderNumber } = {}) {
+  let id = orderId;
+
+  // Fall back to resolving the numeric order_id from the order number we
+  // stored (the Storbie ref). status=Printed because an order with a label
+  // is by definition printed, and the endpoint defaults to Unshipped.
+  if (!id && orderNumber) {
+    const lookup = await ssRequest(
+      `/api/orders?order_number=${encodeURIComponent(orderNumber)}&status=Printed`
+    );
+    id = lookup && lookup.order && lookup.order.order_id;
+  }
+
+  if (!id) {
+    throw new ProviderError(
+      `Could not resolve a Starshipit order_id to reprint (orderId=${JSON.stringify(orderId)}, orderNumber=${JSON.stringify(orderNumber)})`,
+      {
+        status: 404,
+        code: "LABEL_NOT_FOUND",
+        userMessage: "Couldn't find this shipment in Starshipit to reopen its label.",
+      }
+    );
+  }
+
+  const result = await ssRequest("/api/orders/shipments", {
+    method: "POST",
+    body: { order_ids: [id], reprint: true },
+  });
+
+  if (result.success === false) {
+    throw new ProviderError(`Starshipit refused to return the label: ${JSON.stringify(result.errors)}`, {
+      status: 400,
+      code: "LABEL_NOT_FOUND",
+      userMessage: "Starshipit couldn't return the label for this shipment.",
+      details: result.errors,
+    });
+  }
+
+  // Print Labels response: labels: [{ label_type, label_base64_string }].
+  const first = (result.labels || [])[0];
+  return (first && (first.label_base64_string || first.label_base64)) || null;
+}
+
 // createReturnLabel — still NOT IMPLEMENTED, deliberately out of scope.
 // Now unblocked in principle (Create Order takes return_order: true and
 // Starshipit swaps the addresses itself), but booking returns against a
@@ -671,4 +727,4 @@ async function cancelShipment(orderId) {
   return { cancelled: true, orderId: numericId, raw: result };
 }
 
-module.exports = { getRates, createLabel, getTracking, createReturnLabel, cancelShipment };
+module.exports = { getRates, createLabel, getTracking, createReturnLabel, cancelShipment, fetchLabel };

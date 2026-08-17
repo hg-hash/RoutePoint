@@ -3,7 +3,7 @@ const { getProvider } = require("../providers/registry");
 const store = require("../store");
 const { respondWithProviderError } = require("./respondWithProviderError");
 const { validateScheduledFor } = require("./scheduling");
-const { getShippingLabelStatus, cancelShippingLabel, isShippingLabelProvider } = require("./shippingLabelStatus");
+const { getShippingLabelStatus, cancelShippingLabel, isShippingLabelProvider, ensureLabelFile, providerCanProduceLabel } = require("./shippingLabelStatus");
 
 const router = express.Router();
 
@@ -38,6 +38,17 @@ function buildRecord(id, metadata, normalized) {
     // rather than a hosted label. The renderer passes this back over IPC to
     // be opened with shell.openPath (see preload.js / main.js).
     labelPath: metadata.labelPath || null,
+    // The provider's own order identifier, when it needs one that isn't the
+    // tracking number (Starshipit reprints by numeric order_id). Null for
+    // providers that look labels up by connote.
+    providerOrderId: metadata.providerOrderId || null,
+    // Whether a shipping label could be opened for this delivery at all —
+    // drives the "Open shipping label" button. False for Uber/Sherpa (courier
+    // dispatch, no label document) and for cancelled shipments.
+    hasLabel:
+      providerCanProduceLabel(metadata.provider) &&
+      normalized.status !== "cancelled" &&
+      Boolean(metadata.labelPath || metadata.trackingNumber),
     packageNotes: metadata.packageNotes,
     coldChain: metadata.coldChain,
     specialInstructions: metadata.specialInstructions || "",
@@ -128,7 +139,17 @@ router.post("/", async (req, res) => {
 // the persisted store (no live provider calls — the frontend's own polling
 // keeps ongoing ones fresh). Used to repopulate the app on startup.
 router.get("/", (req, res) => {
-  res.json(store.getAllRecords());
+  // Decorated rather than returned raw: the frontend's detail view reads its
+  // delivery straight out of this list, so hasLabel has to be present here
+  // too, not only on GET /:id (which rebuilds via buildRecord). Derived from
+  // stored fields only — no provider calls, so listing stays cheap.
+  res.json(store.getAllRecords().map(r => ({
+    ...r,
+    hasLabel:
+      providerCanProduceLabel(r.provider) &&
+      r.status !== "cancelled" &&
+      Boolean(r.labelPath || r.trackingNumber),
+  })));
 });
 
 // GET /api/deliveries/:id — current status/courier info, from whichever
@@ -154,6 +175,38 @@ router.get("/:id", async (req, res) => {
     res.json(record);
   } catch (err) {
     respondWithProviderError(res, err, "Could not fetch this delivery's status right now, please try again.");
+  }
+});
+
+// POST /api/deliveries/:id/label — returns an on-disk path to this
+// delivery's shipping label, fetching it from the carrier only if we don't
+// already have the file.
+//
+// STRICTLY NON-DESTRUCTIVE: this reopens an existing label. It cannot book,
+// rebook or re-charge anything — it reaches only ensureLabelFile(), which in
+// turn calls the providers' retrieval-only fetchLabel() and never
+// createLabel(). POST rather than GET only because a first call may write
+// the PDF to disk and persist the path.
+router.post("/:id/label", async (req, res) => {
+  const { id } = req.params;
+  const existing = store.getRecord(id);
+
+  if (!existing) {
+    return res.status(404).json({ error: "NOT_FOUND", message: "Delivery not found." });
+  }
+
+  try {
+    const { labelPath, source } = await ensureLabelFile(existing);
+
+    // Persist so the next open is a straight disk hit. Only written when the
+    // path actually changed, to avoid rewriting the store on every open.
+    if (labelPath && existing.labelPath !== labelPath) {
+      store.saveRecord(id, { ...existing, labelPath });
+    }
+
+    res.json({ id, labelPath, source });
+  } catch (err) {
+    respondWithProviderError(res, err, "Could not open the shipping label for this delivery.");
   }
 });
 

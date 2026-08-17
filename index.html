@@ -2408,6 +2408,42 @@ function InfoRow({ label, value }) {
 
 function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvanceStatus }) {
   const [confirming, setConfirming] = useState(false);
+  const [labelBusy, setLabelBusy] = useState(false);
+  const [labelError, setLabelError] = useState(null);
+
+  // Reopens the shipping label. This is READ-ONLY with respect to the
+  // carrier: POST /api/deliveries/:id/label either hands back a PDF already
+  // on disk, or fetches the label for an ALREADY-BOOKED shipment. It cannot
+  // reach createLabel() and cannot book or re-charge anything — see
+  // ensureLabelFile() in server/routes/shippingLabelStatus.js.
+  async function handleOpenLabel() {
+    setLabelError(null);
+    setLabelBusy(true);
+    try {
+      const response = await fetch(`${API_BASE}/deliveries/${encodeURIComponent(delivery.id)}/label`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setLabelError(body.message || "Could not open the shipping label for this delivery.");
+        return;
+      }
+      if (!window.routepoint || !window.routepoint.openLabel) {
+        setLabelError("Label saved to " + body.labelPath + " (open it from there — in-app opening needs the desktop app).");
+        return;
+      }
+      const opened = await window.routepoint.openLabel(body.labelPath);
+      if (!opened || !opened.ok) {
+        setLabelError("Label saved to " + body.labelPath + " but it couldn't be opened automatically.");
+      }
+    } catch {
+      setLabelError("Could not reach the delivery server. Please check it's running and try again.");
+    } finally {
+      setLabelBusy(false);
+    }
+  }
+
   if (!delivery) return null;
 
   const nextIndex = TIMELINE_STEPS.findIndex(s => s.key === delivery.status) + 1;
@@ -2497,7 +2533,24 @@ function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvan
         </div>
       </div>
 
+      {labelError && <p className="text-sm text-red-600 font-medium mb-3">{labelError}</p>}
+
       <div className="flex flex-wrap gap-3">
+        {delivery.hasLabel && (
+          <button
+            onClick={handleOpenLabel}
+            disabled={labelBusy}
+            title="Reopens the existing shipping label. Does not rebook or re-charge anything."
+            className={
+              "px-6 py-3 rounded-xl font-semibold border-2 transition-colors " +
+              (labelBusy
+                ? "bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed"
+                : "bg-white border-blue-300 text-blue-700 hover:bg-blue-50")
+            }
+          >
+            {labelBusy ? "Opening label…" : "Open shipping label"}
+          </button>
+        )}
         {canAdvance && (
           <button
             onClick={() => onAdvanceStatus(delivery.id)}
