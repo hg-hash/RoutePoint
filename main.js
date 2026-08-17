@@ -7,15 +7,24 @@ const labelStore = require("./server/labelStore");
 const PORT = 4000;
 const HEALTH_URL = `http://localhost:${PORT}/api/health`;
 
-// This app is only ever installed/run on this one machine (see the SECRETS
-// note in the packaging task). server/.env deliberately isn't bundled into
-// the packaged app (see the "files" excludes in package.json), so when
-// running from an installed build the spawned backend still needs to be
-// pointed at the real project folder to find it. In dev mode this is just
-// the project's own server/ folder, so it's a no-op.
+// The backend's own folder, resolved from wherever this file actually is:
+// the project root in dev, and the unpacked app directory (resources/app,
+// since asar is disabled) when packaged. server/ sits next to main.js in
+// both cases, so no absolute path needs to be known ahead of time.
+//
+// This previously pointed at a hardcoded developer folder
+// ("C:\\Users\\User\\Documents\\uber-direct-delivery\\server") because the
+// packaged app had no bundled .env and had to be aimed at the original
+// checkout to find credentials. That path did not exist on any other
+// machine — or under a different Windows username — so any installed build
+// silently started with no credentials at all. Credentials now come from
+// ~/.routepoint/.env instead (see server/index.js), which removes the
+// reason for the hardcoded path entirely.
+//
+// ROUTEPOINT_SERVER_DIR still overrides, for pointing an installed build at
+// a different backend checkout.
 const REAL_SERVER_DIR =
-  process.env.ROUTEPOINT_SERVER_DIR ||
-  "C:\\Users\\User\\Documents\\uber-direct-delivery\\server";
+  process.env.ROUTEPOINT_SERVER_DIR || path.join(__dirname, "server");
 
 let serverProcess = null;
 let mainWindow = null;
@@ -28,12 +37,12 @@ function getServerEntry() {
 }
 
 function getServerCwd() {
-  // cwd controls where the backend's dotenv.config() looks for .env — see
-  // REAL_SERVER_DIR above. It does NOT affect where index.js's own
-  // require("./...") calls resolve (that's based on the script's own
-  // location, not cwd), so the packaged code still loads its bundled
-  // node_modules/providers/routes correctly either way.
-  return app.isPackaged ? REAL_SERVER_DIR : path.join(__dirname, "server");
+  // Same directory in dev and packaged now — the two cases only differed
+  // because of the old hardcoded path. cwd no longer affects credential
+  // loading either: server/index.js resolves its .env files from absolute
+  // paths rather than from cwd, so this is just a sensible working
+  // directory rather than load-bearing configuration.
+  return REAL_SERVER_DIR;
 }
 
 function startServer() {
