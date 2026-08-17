@@ -3,6 +3,7 @@ const { getProvider } = require("../providers/registry");
 const store = require("../store");
 const { respondWithProviderError } = require("./respondWithProviderError");
 const { validateScheduledFor } = require("./scheduling");
+const actionStore = require("../storbieActionStore");
 const { getShippingLabelStatus, cancelShippingLabel, isShippingLabelProvider, ensureLabelFile, providerCanProduceLabel } = require("./shippingLabelStatus");
 
 const router = express.Router();
@@ -227,6 +228,20 @@ router.post("/:id/cancel", async (req, res) => {
       : await getProvider(existing.provider).module.cancelDelivery(id);
     const record = buildRecord(id, existing, normalized);
     store.saveRecord(id, record);
+
+    // A cancelled shipment should not still be sitting in Storbie Orders'
+    // Pending Pickup list waiting to be collected. That list is driven by
+    // storbieActionStore, which is a separate store from the delivery
+    // records here and previously had no idea a cancellation had happened —
+    // so a cancelled shipment's row stayed queued forever with no way to
+    // clear it. Dismissing is display state only and makes no carrier call;
+    // the cancellation above already did the real work. Only runs once the
+    // provider cancel has actually succeeded, so a failed cancel leaves the
+    // row exactly where it was.
+    if (existing.source === "storbie" && existing.orderRef) {
+      actionStore.dismissPickup(existing.orderRef);
+    }
+
     res.json(record);
   } catch (err) {
     respondWithProviderError(res, err, "Could not cancel this delivery right now, please try again.");
