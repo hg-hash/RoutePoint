@@ -196,6 +196,30 @@ async function getRates({ destinationName, destinationAddress, destinationPhone,
   return { available, rejected };
 }
 
+// GoSweetSpot returns labels the same way Starshipit does — base64-encoded
+// PDF, not a hosted URL — but nested under Consignments[].OutputFiles keyed
+// by print-output-format name ("LABEL_PDF"). OutputFiles is null unless the
+// create request asked for it via Outputs (see createLabel), so this is
+// tolerant of it being absent.
+function extractLabelBase64(consignment) {
+  const outputs = consignment.OutputFiles || consignment.outputFiles;
+  if (!outputs || typeof outputs !== "object") return null;
+
+  // Prefer an exact LABEL_PDF, then any other PDF variant (100X175 etc.),
+  // rather than assuming only one key can ever be present.
+  const keys = Object.keys(outputs);
+  const key =
+    keys.find(k => k.toUpperCase() === "LABEL_PDF") ||
+    keys.find(k => /^LABEL_PDF/i.test(k));
+  if (!key) return null;
+
+  const value = outputs[key];
+  // Documented as a base64 string; some responses wrap it in an array (the
+  // labels endpoint returns "an array of base64 encoded binary").
+  if (Array.isArray(value)) return value[0] || null;
+  return typeof value === "string" ? value : null;
+}
+
 function normalizeShipment(body) {
   const consignment = (body.Consignments || body.consignments || [])[0] || {};
   return {
@@ -204,6 +228,10 @@ function normalizeShipment(body) {
     trackingUrl: consignment.TrackingUrl || null,
     cost: consignment.Charge != null ? consignment.Charge : consignment.Cost,
     consignmentId: consignment.ConsignmentId || null,
+    // Base64 PDF bytes, matching the field providers/starshipit.js returns —
+    // routes/storbie.js writes whichever provider supplies it to disk via
+    // labelStore, so the on-disk label path works identically for both.
+    labelBase64: extractLabelBase64(consignment),
     message: body.Message || null,
     errors: body.Errors || [],
     raw: body,
@@ -229,10 +257,31 @@ async function createLabel({ quoteId, destinationName, destinationAddress, desti
     Destination: buildDestination({ name: destinationName, address: destinationAddress, phone: destinationPhone, email: destinationEmail }),
     Packages: [buildPackage({ weight, length, width, height })],
     PrintToPrinter: printToPrinter ? "true" : "false",
+    // Without this, OutputFiles comes back null and there is no label to
+    // save — GoSweetSpot only returns label bytes inline when the request
+    // asks for a print output format. "LABEL_PDF" is an A4 page; the
+    // 100x150 variants are flagged experimental in GoSweetSpot's own docs,
+    // so the A4 form is the safe default for saving and reprinting.
+    Outputs: ["LABEL_PDF"],
   };
 
   const result = await gssRequest("/api/shipments", { method: "POST", body });
-  return normalizeShipment(result);
+  const shipment = normalizeShipment(result);
+
+  // Fallback: if the shipment came back without inline label bytes (older
+  // behaviour, or an account whose print settings override Outputs), pull
+  // the label from the dedicated labels endpoint instead of returning a
+  // shipment with no printable label. Never fatal — the shipment already
+  // exists at this point, and the connote is what matters most.
+  if (!shipment.labelBase64 && shipment.trackingNumber) {
+    try {
+      shipment.labelBase64 = await fetchLabel(shipment.trackingNumber);
+    } catch (err) {
+      shipment.labelError = err.message;
+    }
+  }
+
+  return shipment;
 }
 
 // getTracking — status + event history for a single connote, via
@@ -259,6 +308,27 @@ async function getTracking(trackingNumber) {
     events: match.Events || [],
     raw: match,
   };
+}
+
+// fetchLabel — GET /api/labels?connote=...&format=LABEL_PDF. Returns "an
+// array of base64 encoded binary" per GoSweetSpot's docs (a single combined
+// PDF for multi-part shipments), so this takes the first block. Works for
+// any existing consignment, not just one just created, which is what makes
+// it usable as a recovery path.
+async function fetchLabel(trackingNumber, format = "LABEL_PDF") {
+  const result = await gssRequest(
+    `/api/labels?connote=${encodeURIComponent(trackingNumber)}&format=${encodeURIComponent(format)}`
+  );
+
+  if (Array.isArray(result)) return result[0] || null;
+  if (typeof result === "string") return result;
+  if (result && typeof result === "object") {
+    const key = Object.keys(result).find(k => /label/i.test(k));
+    const value = key ? result[key] : null;
+    if (Array.isArray(value)) return value[0] || null;
+    if (typeof value === "string") return value;
+  }
+  return null;
 }
 
 // createReturnLabel — no dedicated returns endpoint is documented (see
@@ -318,9 +388,14 @@ async function bookPickup({ carrier, consignments, totalKg, parts }) {
 async function cancelShipment(trackingNumber) {
   const result = await gssRequest(`/api/shipments?id=${encodeURIComponent(trackingNumber)}`, { method: "DELETE" });
 
-  // Response shape is a plain object keyed by connote — be lenient about
-  // exact casing/structure since this hasn't been live-tested yet (no
-  // deletable test shipment existed at the time this was written).
+  // Response shape is a plain object keyed by connote, e.g.
+  // { "MP0092423973": "Cannot be deleted. Already deleted." }.
+  // LIVE-VERIFIED: a freshly created shipment deletes cleanly, and a second
+  // delete of the same connote comes back "Cannot be deleted. Already
+  // deleted." — which is exactly what the /already/ guard below catches.
+  // Note the shipment stays visible in /v2/shipmentstatus afterwards (the
+  // tracking history is retained), so status is NOT a reliable way to
+  // confirm a cancellation — the delete response is.
   const outcome =
     (result && typeof result === "object" && (result[trackingNumber] || Object.values(result)[0])) ||
     (typeof result === "string" ? result : null);
@@ -342,4 +417,4 @@ async function cancelShipment(trackingNumber) {
   return { cancelled: true, message: outcome, raw: result };
 }
 
-module.exports = { getRates, createLabel, getTracking, createReturnLabel, bookPickup, cancelShipment };
+module.exports = { getRates, createLabel, getTracking, createReturnLabel, bookPickup, cancelShipment, fetchLabel };
