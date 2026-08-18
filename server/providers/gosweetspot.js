@@ -378,8 +378,13 @@ async function bookPickup({ carrier, consignments, totalKg, parts }) {
   // Mainstream, FedEx, NZPost, FirstGlobal — Aramex, CouriersPlease and TNT
   // are absent). A documented success reads "Success. Your booking has been
   // accepted. #NC12345678", so success is required explicitly rather than
-  // assumed.
-  if (!/success/i.test(message)) {
+  // assumed. Observed in practice for Aramex AU Domestic: the response omits
+  // the leading "Success." and instead reads "Your booking has been
+  // accepted. Collection may be same day or next business day depending on
+  // your area and booking time." — so "has been accepted" is also accepted
+  // as a success phrase (checked as one phrase, not the bare word "accepted",
+  // so it still rejects negated refusals like "has NOT been accepted").
+  if (!/success/i.test(message) && !/has\s+been\s+accepted/i.test(message)) {
     throw new ProviderError(`GoSweetSpot did not accept the pickup booking for ${carrier}: ${message}`, {
       status: 400,
       code: "PICKUP_NOT_BOOKED",
