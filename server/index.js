@@ -49,6 +49,8 @@ const customersRouter = require("./routes/customers");
 const auspostPacRouter = require("./routes/auspostPac");
 const gosweetspotRouter = require("./routes/gosweetspot");
 const starshipitRouter = require("./routes/starshipit");
+const authRouter = require("./routes/auth");
+const sessionStore = require("./sessionStore");
 const { DATA_DIR } = require("./dataStore");
 
 // Now that multiple delivery providers exist and the app is designed to
@@ -92,9 +94,36 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, uberEnv: process.env.UBER_ENV || "unknown" });
 });
 
+// Webhooks come from external providers (Uber/Sherpa), not from this app's
+// own frontend — they can never carry a session token, so this has to stay
+// public. It's also unreachable from outside this machine anyway now that
+// the server only binds to 127.0.0.1 (see app.listen below), so this is
+// currently dormant rather than a real hole.
+app.use("/api/webhooks", webhooksRouter);
+
+// GET /status, POST /setup, POST /login are public by necessity (nothing to
+// authenticate against yet); POST /logout just drops whatever token it's
+// given, session or not.
+app.use("/api/auth", authRouter);
+
+// Everything mounted below this requires a valid session token, set once at
+// login/setup (see index.html's AuthGate + window.fetch wrapper, which
+// attaches it as "Authorization: Bearer <token>" automatically). Registered
+// after /api/health and /api/auth so those stay reachable without one —
+// Express walks its middleware stack in registration order per request, so
+// a request that already matched and was answered by one of those two never
+// reaches this.
+app.use((req, res, next) => {
+  const header = req.headers.authorization || "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : null;
+  if (!sessionStore.isValid(token)) {
+    return res.status(401).json({ error: "UNAUTHENTICATED", message: "Please log in." });
+  }
+  next();
+});
+
 app.use("/api/quote", quoteRouter);
 app.use("/api/deliveries", deliveriesRouter);
-app.use("/api/webhooks", webhooksRouter);
 app.use("/api/storbie", storbieRouter);
 app.use("/api/providers", providersRouter);
 app.use("/api/settings", settingsRouter);
@@ -114,8 +143,12 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`RoutePoint delivery server listening on http://localhost:${PORT}`);
+// Bound to localhost only — without this, Node's default (all interfaces)
+// would make every /api/* route reachable from other devices on the same
+// network, which would undermine the point of requiring a login at all.
+const HOST = process.env.ROUTEPOINT_HOST || "127.0.0.1";
+app.listen(PORT, HOST, () => {
+  console.log(`RoutePoint delivery server listening on http://${HOST}:${PORT}`);
   console.log(`Credentials loaded from  ${describeEnvSources()}`);
   console.log(`Customer/delivery data persisted to ${DATA_DIR}`);
 });

@@ -102,6 +102,25 @@ function parseAuAddressTail(address) {
 
 const API_BASE = "http://localhost:4000/api";
 
+// Every /api/* route except /api/auth/* and /api/health now requires a
+// session token (see server/index.js's requireSession middleware) — set
+// once at login and attached here rather than editing every fetch call
+// site throughout this file. authToken lives only in memory: closing the
+// app (or even just calling setAuthToken(null) on logout) forgets it, which
+// is exactly the "log in each time you open RoutePoint" behaviour wanted.
+let authToken = null;
+function setAuthToken(token) {
+  authToken = token;
+}
+
+const nativeFetch = window.fetch.bind(window);
+window.fetch = function (url, options = {}) {
+  if (typeof url === "string" && url.startsWith(API_BASE) && authToken) {
+    options = { ...options, headers: { ...(options.headers || {}), Authorization: `Bearer ${authToken}` } };
+  }
+  return nativeFetch(url, options);
+};
+
 // Uber's status vocabulary (pending/pickup/pickup_complete/dropoff/delivered/canceled)
 // gets mapped onto the app's existing simplified status keys so StatusBadge,
 // StatusTimeline, and the ongoing/history filters all keep working unchanged.
@@ -229,7 +248,7 @@ function SourceTag({ source }) {
   );
 }
 
-function Sidebar({ activeSection, onNavigate, onNewDelivery, activeCount, mobileOpen, onCloseMobile }) {
+function Sidebar({ activeSection, onNavigate, onNewDelivery, activeCount, mobileOpen, onCloseMobile, onLogout }) {
   return (
     <React.Fragment>
       {mobileOpen && (
@@ -279,6 +298,15 @@ function Sidebar({ activeSection, onNavigate, onNewDelivery, activeCount, mobile
             </button>
           ))}
         </nav>
+
+        <div className="px-4 py-4 border-t border-slate-200">
+          <button
+            onClick={onLogout}
+            className="w-full py-3 rounded-xl font-semibold text-left px-4 text-slate-600 hover:bg-slate-100"
+          >
+            Lock RoutePoint
+          </button>
+        </div>
       </aside>
     </React.Fragment>
   );
@@ -599,7 +627,7 @@ function AusPostEstimateWidget({ pickupAddress, dropoffAddress }) {
   );
 }
 
-function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
+function NewDeliveryForm({ customers, onBookDelivery, onNavigate }) {
   const [form, setForm] = useState(emptyDeliveryForm);
   const [errors, setErrors] = useState({});
   const [quote, setQuote] = useState(null);
@@ -817,11 +845,6 @@ function NewDeliveryForm({ customers, onBookDelivery, banner, onNavigate }) {
 
   return (
     <div className="max-w-6xl mx-auto px-4 py-8">
-      {banner && (
-        <div className="mb-6 bg-green-50 border border-green-300 text-green-800 rounded-xl px-5 py-4 font-semibold">
-          {banner}
-        </div>
-      )}
       {apiError && (
         <div className="mb-6 bg-red-50 border border-red-300 text-red-800 rounded-xl px-5 py-4 font-semibold">
           {apiError}
@@ -2646,15 +2669,19 @@ function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvan
   );
 }
 
-function App() {
+function App({ onLogout }) {
   const [section, setSection] = useState("ongoing");
   const [originSection, setOriginSection] = useState("ongoing");
   const [deliveries, setDeliveries] = useState([]);
   const [customers, setCustomers] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
-  const [banner, setBanner] = useState(null);
+  const [banner, setBannerState] = useState(null); // { text, tone: "success" | "error" } | null
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const deliveriesRef = useRef(deliveries);
+
+  function setBanner(text, tone) {
+    setBannerState(text ? { text, tone: tone || "success" } : null);
+  }
 
   useEffect(() => {
     deliveriesRef.current = deliveries;
@@ -2788,13 +2815,13 @@ function App() {
         const response = await fetch(`${API_BASE}/deliveries/${id}/cancel`, { method: "POST" });
         const body = await parseJsonResponse(response);
         if (!response.ok) {
-          setBanner(body.message || "Could not cancel this delivery right now, please try again.");
+          setBanner(body.message || "Could not cancel this delivery right now, please try again.", "error");
           return;
         }
         const mapped = mapDeliveryRecord(body);
         setDeliveries(prev => prev.map(d => (d.id === id ? { ...d, ...mapped } : d)));
       } catch {
-        setBanner("Could not reach the delivery server to cancel this order. Please try again.");
+        setBanner("Could not reach the delivery server to cancel this order. Please try again.", "error");
       }
       return;
     }
@@ -2831,12 +2858,12 @@ function App() {
       });
       const body = await parseJsonResponse(response);
       if (!response.ok) {
-        setBanner(body.message || "Could not save this customer right now.");
+        setBanner(body.message || "Could not save this customer right now.", "error");
         return;
       }
       setCustomers(prev => [...prev, body]);
     } catch {
-      setBanner("Could not reach the delivery server. Please check it's running and try again.");
+      setBanner("Could not reach the delivery server. Please check it's running and try again.", "error");
     }
   }
 
@@ -2849,12 +2876,12 @@ function App() {
       });
       const body = await parseJsonResponse(response);
       if (!response.ok) {
-        setBanner(body.message || "Could not update this customer right now.");
+        setBanner(body.message || "Could not update this customer right now.", "error");
         return;
       }
       setCustomers(prev => prev.map(c => (c.id === id ? body : c)));
     } catch {
-      setBanner("Could not reach the delivery server. Please check it's running and try again.");
+      setBanner("Could not reach the delivery server. Please check it's running and try again.", "error");
     }
   }
 
@@ -2863,12 +2890,12 @@ function App() {
       const response = await fetch(`${API_BASE}/customers/${id}`, { method: "DELETE" });
       if (!response.ok) {
         const body = await parseJsonResponse(response);
-        setBanner(body.message || "Could not delete this customer right now.");
+        setBanner(body.message || "Could not delete this customer right now.", "error");
         return;
       }
       setCustomers(prev => prev.filter(c => c.id !== id));
     } catch {
-      setBanner("Could not reach the delivery server. Please check it's running and try again.");
+      setBanner("Could not reach the delivery server. Please check it's running and try again.", "error");
     }
   }
 
@@ -2890,10 +2917,25 @@ function App() {
         activeCount={activeCount}
         mobileOpen={mobileNavOpen}
         onCloseMobile={() => setMobileNavOpen(false)}
+        onLogout={onLogout}
       />
       <div className="md:pl-72">
         <MobileTopBar onOpenMenu={() => setMobileNavOpen(true)} />
-        {section === "new" && <NewDeliveryForm customers={customers} onBookDelivery={handleBookDelivery} banner={banner} onNavigate={navigate} />}
+        {banner && (
+          <div className="max-w-6xl mx-auto px-4 pt-8">
+            <div
+              className={
+                "mb-6 rounded-xl px-5 py-4 font-semibold border " +
+                (banner.tone === "error"
+                  ? "bg-red-50 border-red-300 text-red-800"
+                  : "bg-green-50 border-green-300 text-green-800")
+              }
+            >
+              {banner.text}
+            </div>
+          </div>
+        )}
+        {section === "new" && <NewDeliveryForm customers={customers} onBookDelivery={handleBookDelivery} onNavigate={navigate} />}
         {section === "ongoing" && <OngoingDeliveriesScreen deliveries={deliveries} onSelect={id => handleSelect(id, "ongoing")} />}
         {section === "history" && <DeliveryHistoryTable deliveries={deliveries} onSelect={id => handleSelect(id, "history")} />}
         {section === "customers" && (
@@ -2927,7 +2969,125 @@ function App() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+// Gates the whole app behind a single shared password (see server/authStore.js
+// + server/routes/auth.js). First run has no password configured yet, so this
+// shows a "set a password" form instead of "enter password" — after that,
+// every launch (and every "Lock RoutePoint") asks for the same shared
+// password, like a till PIN.
+function LoginScreen({ configured, onSubmit }) {
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+
+  async function handleSubmit(e) {
+    e.preventDefault();
+    setError(null);
+
+    if (!configured && password !== confirmPassword) {
+      setError("Passwords don't match.");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await onSubmit(password);
+    } catch (err) {
+      setError(err.message || "Something went wrong. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen flex items-center justify-center px-4">
+      <form onSubmit={handleSubmit} className="w-full max-w-sm bg-white rounded-2xl shadow-lg border border-slate-200 p-8">
+        <div className="w-12 h-12 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-lg mb-4">M</div>
+        <h1 className="text-xl font-bold text-slate-900 mb-1">
+          {configured ? "RoutePoint is locked" : "Set up RoutePoint"}
+        </h1>
+        <p className="text-sm text-slate-500 mb-6">
+          {configured
+            ? "Enter the shared password to continue."
+            : "Choose a shared password. Everyone using RoutePoint on this PC will use it to unlock the app."}
+        </p>
+
+        {error && (
+          <div className="mb-4 bg-red-50 border border-red-300 text-red-800 rounded-lg px-4 py-3 text-sm font-semibold">
+            {error}
+          </div>
+        )}
+
+        <input
+          type="password"
+          autoFocus
+          value={password}
+          onChange={e => setPassword(e.target.value)}
+          placeholder="Password"
+          className="w-full mb-3 px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+        />
+        {!configured && (
+          <input
+            type="password"
+            value={confirmPassword}
+            onChange={e => setConfirmPassword(e.target.value)}
+            placeholder="Confirm password"
+            className="w-full mb-3 px-4 py-3 rounded-xl border border-slate-300 focus:outline-none focus:ring-2 focus:ring-blue-500"
+          />
+        )}
+
+        <button
+          type="submit"
+          disabled={loading || !password}
+          className="w-full py-3 rounded-xl font-bold text-white bg-blue-600 hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {loading ? "Please wait…" : configured ? "Unlock" : "Set password"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function AuthGate() {
+  // null while checking /auth/status, then "loading" | "login" | "setup" | "in"
+  const [phase, setPhase] = useState("loading");
+
+  useEffect(() => {
+    fetch(`${API_BASE}/auth/status`)
+      .then(async response => {
+        const body = await parseJsonResponse(response);
+        setPhase(body.configured ? "login" : "setup");
+      })
+      .catch(() => setPhase("login"));
+  }, []);
+
+  async function submitPassword(password) {
+    const endpoint = phase === "setup" ? "setup" : "login";
+    const response = await fetch(`${API_BASE}/auth/${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    const body = await parseJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(body.message || "Could not log in right now.");
+    }
+    setAuthToken(body.token);
+    setPhase("in");
+  }
+
+  function handleLogout() {
+    fetch(`${API_BASE}/auth/logout`, { method: "POST" }).catch(() => {});
+    setAuthToken(null);
+    setPhase("login");
+  }
+
+  if (phase === "loading") return null;
+  if (phase === "in") return <App onLogout={handleLogout} />;
+  return <LoginScreen configured={phase === "login"} onSubmit={submitPassword} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<AuthGate />);
 </script>
 </body>
 </html>

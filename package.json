@@ -1,12 +1,13 @@
 {
   "name": "routepoint",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "description": "RoutePoint desktop app — Electron wrapper around the existing Express backend and index.html frontend.",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "dist": "electron-builder"
+    "dist": "electron-builder",
+    "release": "electron-builder --publish always"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -16,6 +17,11 @@
     "appId": "com.medicinesrus.routepoint",
     "productName": "RoutePoint",
     "icon": "assets/icon.ico",
+    "publish": {
+      "provider": "github",
+      "owner": "hg-hash",
+      "repo": "RoutePoint"
+    },
     "directories": {
       "output": "dist"
     },
@@ -42,5 +48,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true
     }
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

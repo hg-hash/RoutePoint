@@ -2,6 +2,7 @@ const path = require("path");
 const http = require("http");
 const { spawn } = require("child_process");
 const { app, BrowserWindow, Menu, ipcMain, shell } = require("electron");
+const { autoUpdater } = require("electron-updater");
 const labelStore = require("./server/labelStore");
 
 const PORT = 4000;
@@ -147,12 +148,44 @@ ipcMain.handle("routepoint:open-label", async (_event, labelPath) => {
   return problem ? { ok: false, error: problem } : { ok: true };
 });
 
+// Checks GitHub Releases (hg-hash/RoutePoint — see package.json's
+// build.publish) for a newer version every time the app opens, downloads it
+// in the background, and installs it as soon as it's ready by quitting and
+// relaunching with the new version. That relaunch happens with no prompt,
+// so it can land mid-session if a release goes out while someone's using
+// the app — acceptable for how small/internal this app's userbase is, but
+// worth knowing if that ever needs to change to "install on next launch"
+// instead.
+//
+// Only meaningful in a packaged build: electron-updater has no
+// app-update.yml to check against when running via `electron .`, so this
+// is skipped entirely in dev rather than logging noise on every start.
+function checkForAppUpdates() {
+  if (!app.isPackaged) return;
+
+  autoUpdater.autoDownload = true;
+
+  autoUpdater.on("error", (err) => {
+    console.error("[RoutePoint] auto-update error:", err.message);
+  });
+
+  autoUpdater.on("update-downloaded", () => {
+    console.log("[RoutePoint] update downloaded — installing and relaunching now.");
+    autoUpdater.quitAndInstall();
+  });
+
+  autoUpdater.checkForUpdates().catch(err => {
+    console.error("[RoutePoint] could not check for updates:", err.message);
+  });
+}
+
 Menu.setApplicationMenu(null);
 
 app.whenReady().then(() => {
   app.setAppUserModelId("com.medicinesrus.routepoint");
   startServer();
   createWindow();
+  checkForAppUpdates();
 });
 
 app.on("window-all-closed", () => {
