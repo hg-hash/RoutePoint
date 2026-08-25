@@ -107,11 +107,20 @@ function authHeaders() {
 }
 
 async function gssRequest(path, { method = "GET", body } = {}) {
+  // Built outside the try below on purpose: authHeaders() throws its own
+  // specific ProviderError ("GoSweetSpot shipping isn't configured") when
+  // GOSWEETSPOT_API_KEY is missing, and that must reach the caller as-is —
+  // building it inside the try previously let that config error get caught
+  // and rewritten into the generic "Could not reach GoSweetSpot right now"
+  // network-error message below, which sent people looking for a network
+  // problem that didn't exist.
+  const headers = authHeaders();
+
   let response;
   try {
     response = await fetch(`${BASE_URL}${path}`, {
       method,
-      headers: authHeaders(),
+      headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch (err) {
@@ -403,20 +412,21 @@ async function bookPickup({ carrier, consignments, totalKg, parts }) {
 // Response is a JSON object mapping each connote to an outcome string —
 // GoSweetSpot's docs list the possible values as "Invalid ticket number",
 // "Already deleted", "Already delivered", "Already in transit", and
-// "Already manifested", all of which mean it CANNOT be deleted (only a
-// genuinely unprocessed consignment can be). A shipment whose pickup has
-// already been booked is quite likely to already be manifested — this
-// doesn't pre-guess that though, it calls the real endpoint and reports
-// back whatever GoSweetSpot actually says, rather than assuming success or
-// failure ahead of time.
+// "Already manifested". Only the last three mean it genuinely CANNOT be
+// cancelled (already manifested/in transit/delivered at the carrier).
+// "Already deleted" means the opposite: the shipment is gone already —
+// e.g. cancelled directly via GoSweetSpot's own portal rather than through
+// RoutePoint — so the desired end state (not active) is already achieved.
+// Treating that as a failure left RoutePoint's own record stuck showing
+// the shipment as ongoing forever with no way to clear it, even though
+// GoSweetSpot agrees it's cancelled. So this is treated as an idempotent
+// success, same as a fresh delete, and RoutePoint's record is brought in
+// line with what GoSweetSpot already reports.
 async function cancelShipment(trackingNumber) {
   const result = await gssRequest(`/api/shipments?id=${encodeURIComponent(trackingNumber)}`, { method: "DELETE" });
 
   // Response shape is a plain object keyed by connote, e.g.
   // { "MP0092423973": "Cannot be deleted. Already deleted." }.
-  // LIVE-VERIFIED: a freshly created shipment deletes cleanly, and a second
-  // delete of the same connote comes back "Cannot be deleted. Already
-  // deleted." — which is exactly what the /already/ guard below catches.
   // Note the shipment stays visible in /v2/shipmentstatus afterwards (the
   // tracking history is retained), so status is NOT a reliable way to
   // confirm a cancellation — the delete response is.
@@ -425,7 +435,8 @@ async function cancelShipment(trackingNumber) {
     (typeof result === "string" ? result : null);
 
   const outcomeText = String(outcome || "").toLowerCase();
-  const cancelled = outcomeText.length > 0 && !/already|invalid/.test(outcomeText);
+  const cancelled =
+    outcomeText.length > 0 && (!/already|invalid/.test(outcomeText) || outcomeText.includes("already deleted"));
 
   if (!cancelled) {
     throw new ProviderError(`GoSweetSpot would not delete shipment ${trackingNumber}: ${JSON.stringify(result)}`, {
