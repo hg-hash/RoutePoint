@@ -49,6 +49,7 @@ const customersRouter = require("./routes/customers");
 const auspostPacRouter = require("./routes/auspostPac");
 const gosweetspotRouter = require("./routes/gosweetspot");
 const starshipitRouter = require("./routes/starshipit");
+const sherpaRouter = require("./routes/sherpa");
 const authRouter = require("./routes/auth");
 const sessionStore = require("./sessionStore");
 const { DATA_DIR } = require("./dataStore");
@@ -62,7 +63,7 @@ const OPTIONAL_ENV_GROUPS = [
   { name: "Uber Direct", vars: ["UBER_CLIENT_ID", "UBER_CLIENT_SECRET", "UBER_CUSTOMER_ID"], affects: '"provider": "uber" (also the default when none is specified)' },
   { name: "Sherpa", vars: ["SHERPA_CLIENT_ID", "SHERPA_CLIENT_SECRET"], affects: '"provider": "sherpa"' },
   { name: "Storbie", vars: ["STORBIE_API_ADDRESS", "STORBIE_KEY_CODE", "STORBIE_SECRET"], affects: "GET /api/storbie/orders" },
-  { name: "Google Maps", vars: ["GOOGLE_MAPS_API_KEY"], affects: "address autocomplete (falls back to plain text fields)" },
+  { name: "Google Maps", vars: ["GOOGLE_MAPS_API_KEY"], affects: "address autocomplete (falls back to plain text fields) and CSV customer-import address verification (POST /api/customers/import — addresses just won't be auto-verified)" },
   { name: "AusPost PAC", vars: ["AUSPOST_PAC_API_KEY"], affects: "GET/POST /api/auspost/* (postage estimate + postcode search — not label creation)" },
   { name: "GoSweetSpot", vars: ["GOSWEETSPOT_API_KEY"], affects: "shipping label creation (POST /api/storbie/orders/:orderRef/create-label and /api/shipping-labels/gosweetspot/*)" },
   { name: "Starshipit", vars: ["STARSHIPIT_API_KEY", "STARSHIPIT_SUBSCRIPTION_KEY"], affects: "Australia Post/MyPost Business rates (/api/shipping-labels/starshipit/*) — label creation not yet implemented, see providers/starshipit.js" },
@@ -88,7 +89,10 @@ checkOptionalEnv();
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+// Default 100kb limit is too small for a bulk customer-CSV import (see
+// routes/customers.js's /import) — a few thousand rows of name/address/phone
+// text can exceed that easily.
+app.use(express.json({ limit: "5mb" }));
 
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, uberEnv: process.env.UBER_ENV || "unknown" });
@@ -124,6 +128,7 @@ app.use((req, res, next) => {
 
 app.use("/api/quote", quoteRouter);
 app.use("/api/deliveries", deliveriesRouter);
+app.use("/api/sherpa", sherpaRouter);
 app.use("/api/storbie", storbieRouter);
 app.use("/api/providers", providersRouter);
 app.use("/api/settings", settingsRouter);

@@ -5,6 +5,7 @@ const { respondWithProviderError } = require("./respondWithProviderError");
 const { validateScheduledFor } = require("./scheduling");
 const actionStore = require("../storbieActionStore");
 const { getShippingLabelStatus, cancelShippingLabel, isShippingLabelProvider, ensureLabelFile, providerCanProduceLabel } = require("./shippingLabelStatus");
+const sherpa = require("../providers/sherpa");
 
 const router = express.Router();
 
@@ -56,6 +57,16 @@ function buildRecord(id, metadata, normalized) {
     scheduledFor: metadata.scheduledFor || null,
     createdAt: metadata.createdAt,
     liveTracking: normalized.liveTracking !== undefined ? normalized.liveTracking : true,
+    // Sherpa delivery-speed audit trail (see routes/sherpa.js's
+    // /delivery-options and this route's price-recheck-before-booking
+    // below) — null for every other provider and for Sherpa bookings made
+    // without going through the delivery-options picker (e.g. ASAP).
+    courierServiceCode: metadata.courierServiceCode != null ? metadata.courierServiceCode : null,
+    courierServiceName: metadata.courierServiceName || null,
+    quotedPrice: metadata.quotedPrice != null ? metadata.quotedPrice : null,
+    quoteCreatedAt: metadata.quoteCreatedAt || null,
+    quoteSelectedAutomatically: metadata.quoteSelectedAutomatically != null ? metadata.quoteSelectedAutomatically : null,
+    finalPrice: metadata.finalPrice != null ? metadata.finalPrice : (normalized.fee != null ? normalized.fee : null),
   };
 }
 
@@ -77,6 +88,16 @@ router.post("/", async (req, res) => {
     specialInstructions,
     scheduledFor,
     provider,
+    // Sherpa delivery-speed picker (New Delivery's "Schedule for later" +
+    // Sherpa — see routes/sherpa.js's /delivery-options and
+    // index.html's SherpaDeliverySpeedPicker). Ignored for every other
+    // provider/flow.
+    deliveryOptionId,
+    deliveryOptionName,
+    quotedPrice,
+    quotedAt,
+    quoteSelectedAutomatically,
+    acceptPriceChange,
   } = req.body || {};
 
   if (!pickupAddress || !dropoffAddress || !customerName || !customerPhone || !orderRef) {
@@ -99,6 +120,37 @@ router.post("/", async (req, res) => {
       });
     }
 
+    // Sherpa has no reservable/expiring quote (see providers/sherpa.js's
+    // module header), so the price shown while picking a delivery speed can
+    // have moved by the time staff actually book. Re-quote the SAME option
+    // right before booking and refuse to silently accept a different price
+    // — the frontend shows a confirm dialog and retries with
+    // acceptPriceChange: true once staff agree to the new price.
+    let finalPrice = quotedPrice != null ? quotedPrice : null;
+    if (key === "sherpa" && deliveryOptionId != null) {
+      const recheck = await sherpa.getDeliveryOptions({ pickupAddress, dropoffAddress, readyAt: scheduledFor || null, packageNotes });
+      const stillAvailable = recheck.quotes.find(q => String(q.deliveryOptionId) === String(deliveryOptionId));
+
+      if (!stillAvailable) {
+        return res.status(409).json({
+          error: "OPTION_NO_LONGER_AVAILABLE",
+          message: "This Sherpa delivery option is no longer available. Please get a new quote.",
+        });
+      }
+
+      const previousPrice = quotedPrice != null ? Number(quotedPrice) : null;
+      if (previousPrice != null && stillAvailable.price !== previousPrice && !acceptPriceChange) {
+        return res.status(409).json({
+          error: "PRICE_CHANGED",
+          message: "Sherpa's price for this delivery option has changed since it was quoted.",
+          previousPrice,
+          currentPrice: stillAvailable.price,
+        });
+      }
+
+      finalPrice = stillAvailable.price;
+    }
+
     const normalized = await providerModule.createDelivery({
       quoteId,
       pickupAddress,
@@ -110,6 +162,7 @@ router.post("/", async (req, res) => {
       coldChain,
       specialInstructions,
       scheduledFor: scheduledFor || null,
+      deliveryOptionId: key === "sherpa" ? deliveryOptionId : undefined,
     });
 
     const metadata = {
@@ -126,6 +179,12 @@ router.post("/", async (req, res) => {
       provider: key,
       source: "manual",
       createdAt: new Date().toISOString(),
+      courierServiceCode: key === "sherpa" && deliveryOptionId != null ? deliveryOptionId : null,
+      courierServiceName: key === "sherpa" ? deliveryOptionName || null : null,
+      quotedPrice: key === "sherpa" ? quotedPrice : null,
+      quoteCreatedAt: key === "sherpa" ? quotedAt || null : null,
+      quoteSelectedAutomatically: key === "sherpa" ? !!quoteSelectedAutomatically : null,
+      finalPrice: key === "sherpa" ? finalPrice : null,
     };
     const record = buildRecord(normalized.providerDeliveryId, metadata, normalized);
     store.saveRecord(normalized.providerDeliveryId, record);

@@ -482,6 +482,143 @@ function QuoteCard({ quote, onBook, bookLoading }) {
   );
 }
 
+// Static blurbs for the known Sherpa delivery-option ids (see
+// server/providers/sherpa.js's SHERPA_OPTION_LABELS, confirmed live against
+// Sherpa's own schema on 2026-08-25). Sherpa's /quotes/delivery_options
+// response has no name or delivery-window field at all, so these are
+// RouteMedicines' own description text, not anything Sherpa returns —
+// deliberately omitted for an id not in this map rather than guessing one.
+const SHERPA_OPTION_DESCRIPTIONS = {
+  0: "Delivered within 2 hours of pickup",
+  1: "Delivered within 4 hours of pickup",
+  2: "Delivered later the same day",
+  3: "Sherpa's flat-rate service",
+  5: "Delivered as soon as possible",
+  6: "Sherpa's bulk-rate service",
+};
+
+// Delivery-speed cards for Sherpa's per-option live pricing (New Delivery's
+// "Schedule for later" + Sherpa only — see NewDeliveryForm). Cheapest option
+// is pre-selected and badged by the caller (quotes already arrive sorted
+// cheapest-first with `recommended` flagged — see
+// providers/sherpa.js's getDeliveryOptions()); this component only renders
+// the choices and reports a click, it doesn't decide what's selected.
+function SherpaDeliverySpeedPicker({ loading, error, quotes, selectedId, onSelect, staleNotice, onRetry }) {
+  if (loading) {
+    return (
+      <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm font-medium text-slate-500">
+        Checking Sherpa delivery options…
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3">
+        <p className="text-sm font-semibold text-red-700">{error}</p>
+        <button type="button" onClick={onRetry} className="mt-2 text-sm font-semibold text-red-700 underline hover:no-underline">
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  if (!quotes) return null; // Not enough info yet (address/ready date+time incomplete).
+
+  if (quotes.length === 0) {
+    return (
+      <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+        <p className="text-sm font-semibold text-amber-800">No Sherpa delivery options are available for this address and time.</p>
+        <p className="text-sm text-amber-700 mt-1">Try another ready time.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-3 space-y-2">
+      {staleNotice && (
+        <p className="text-sm font-semibold text-amber-800 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+          {staleNotice}
+        </p>
+      )}
+      {quotes.map(q => {
+        const selected = String(q.deliveryOptionId) === String(selectedId);
+        return (
+          <button
+            key={q.deliveryOptionId}
+            type="button"
+            onClick={() => onSelect(q)}
+            className={
+              "w-full text-left rounded-xl border-2 px-4 py-3 flex items-center justify-between gap-3 transition-colors " +
+              (selected ? "border-blue-500 bg-blue-50" : "border-slate-200 bg-white hover:border-slate-300")
+            }
+          >
+            <div className="flex items-start gap-3">
+              <span
+                className={
+                  "mt-1 w-4 h-4 rounded-full border-2 flex-shrink-0 " +
+                  (selected ? "border-blue-600 bg-blue-600" : "border-slate-300")
+                }
+              />
+              <div>
+                <div className="flex items-center gap-2">
+                  <span className="font-semibold text-slate-900">{q.name}</span>
+                  {q.recommended && (
+                    <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold bg-emerald-100 text-emerald-700 whitespace-nowrap">
+                      Cheapest
+                    </span>
+                  )}
+                </div>
+                {SHERPA_OPTION_DESCRIPTIONS[q.deliveryOptionId] && (
+                  <div className="text-sm text-slate-500">{SHERPA_OPTION_DESCRIPTIONS[q.deliveryOptionId]}</div>
+                )}
+              </div>
+            </div>
+            <span className="font-bold text-slate-900 whitespace-nowrap">{formatMoney(q.price, q.currency)}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// Sidebar summary + booking button for the Sherpa "Schedule for later" flow
+// — occupies the same slot QuoteCard does for every other case, but reads
+// off the selected delivery-speed quote instead of a generic single `quote`
+// (Sherpa's per-option quotes arrive automatically, not from a "Get Quote"
+// click — see NewDeliveryForm's requote effect).
+function SherpaScheduledBookingCard({ quotes, selectedId, onBook, bookLoading }) {
+  const selected = (quotes || []).find(q => String(q.deliveryOptionId) === String(selectedId));
+
+  if (!selected) {
+    return (
+      <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center text-slate-400 sticky top-24">
+        <p className="font-medium">Fill in the pickup/dropoff address and ready date &amp; time to see Sherpa's delivery speed options here.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 sticky top-24">
+      <div className="text-sm font-semibold text-slate-500 uppercase tracking-wide">Selected delivery</div>
+      <div className="mt-2 flex items-baseline justify-between gap-2">
+        <span className="text-xl font-bold text-slate-900">{selected.name}</span>
+        <span className="text-2xl font-extrabold text-slate-900">{formatMoney(selected.price, selected.currency)}</span>
+      </div>
+      <button
+        onClick={onBook}
+        disabled={bookLoading}
+        className={
+          "mt-6 w-full py-4 rounded-xl font-bold text-lg transition-colors " +
+          (bookLoading ? "bg-slate-200 text-slate-400 cursor-not-allowed" : "bg-blue-600 text-white hover:bg-blue-700 active:bg-blue-800")
+        }
+      >
+        {bookLoading ? "Scheduling…" : "Schedule Delivery"}
+      </button>
+    </div>
+  );
+}
+
 function emptyDeliveryForm() {
   return {
     pickupAddress: DEFAULT_PICKUP_ADDRESS,
@@ -638,6 +775,26 @@ function NewDeliveryForm({ customers, onBookDelivery, onNavigate }) {
   const [selectedProvider, setSelectedProvider] = useState(null);
   const [dropoffPostcodeWarning, setDropoffPostcodeWarning] = useState(null);
 
+  // Sherpa delivery-speed picker (New Delivery's "Schedule for later" +
+  // Sherpa only — see SherpaDeliverySpeedPicker and
+  // routes/sherpa.js's /delivery-options). sherpaQuotes stays null until
+  // there's enough on the form to actually quote (address + ready date/time);
+  // an empty array means Sherpa was asked and had nothing to offer.
+  const [sherpaQuotes, setSherpaQuotes] = useState(null);
+  const [sherpaQuotesLoading, setSherpaQuotesLoading] = useState(false);
+  const [sherpaQuotesError, setSherpaQuotesError] = useState(null);
+  const [sherpaQuotesFetchedAt, setSherpaQuotesFetchedAt] = useState(null);
+  const [selectedSherpaOptionId, setSelectedSherpaOptionId] = useState(null);
+  const [sherpaAutoSelected, setSherpaAutoSelected] = useState(true);
+  const [sherpaStaleNotice, setSherpaStaleNotice] = useState(null);
+  const [sherpaPriceChange, setSherpaPriceChange] = useState(null); // { previousPrice, currentPrice } | null
+  const [sherpaRefreshToken, setSherpaRefreshToken] = useState(0); // bump to force a re-quote (Retry button)
+  // Mirrors selectedSherpaOptionId/sherpaAutoSelected for the requote effect
+  // below to read synchronously — the effect's own closure over that state
+  // would otherwise be stale by the time its debounced fetch resolves,
+  // since a manual card click deliberately doesn't re-trigger a requote.
+  const sherpaSelectionRef = useRef({ id: null, auto: true });
+
   // Light-touch postcode check via AusPost's real postcode/search — useful
   // independent of AusPost shipping specifically, so it runs for every
   // provider. A soft warning only, never blocks the form. Debounced since
@@ -694,6 +851,95 @@ function NewDeliveryForm({ customers, onBookDelivery, onNavigate }) {
   const noProvidersAvailable = availableProviders !== null && availableProviders.length === 0;
   const selectedProviderInfo = availableProviders && availableProviders.find(p => p.key === selectedProvider);
   const schedulingSupported = !!(selectedProviderInfo && selectedProviderInfo.supportsScheduling);
+  const isSherpaScheduled = selectedProvider === "sherpa" && form.deliveryTiming === "scheduled";
+
+  function setSherpaSelection(id, auto) {
+    setSelectedSherpaOptionId(id);
+    setSherpaAutoSelected(auto);
+    sherpaSelectionRef.current = { id, auto };
+  }
+
+  // Requotes Sherpa's live delivery-speed options whenever anything that
+  // could change price/availability changes (address, ready date/time,
+  // package notes) — debounced so editing several fields in a row doesn't
+  // fire a request per keystroke. Only runs for Sherpa + "Schedule for
+  // later"; ASAP Sherpa and every other provider keep using the plain
+  // single-price handleGetQuote() flow below, untouched.
+  useEffect(() => {
+    if (!isSherpaScheduled) {
+      setSherpaQuotes(null);
+      setSherpaQuotesError(null);
+      setSherpaQuotesLoading(false);
+      setSherpaStaleNotice(null);
+      setSherpaSelection(null, true);
+      return;
+    }
+
+    const readyAtIso = combineScheduledForIso(form.scheduledDate, form.scheduledTime);
+    if (!form.pickupAddress.trim() || !form.dropoffAddress.trim() || !readyAtIso) {
+      setSherpaQuotes(null);
+      setSherpaQuotesError(null);
+      setSherpaQuotesLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSherpaQuotesLoading(true);
+    setSherpaQuotesError(null);
+
+    const timeout = setTimeout(() => {
+      fetch(`${API_BASE}/sherpa/delivery-options`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          pickupAddress: form.pickupAddress.trim(),
+          dropoffAddress: form.dropoffAddress.trim(),
+          readyAt: readyAtIso,
+          packageNotes: form.packageNotes.trim(),
+        }),
+      })
+        .then(async response => {
+          const body = await parseJsonResponse(response);
+          if (cancelled) return;
+          if (!response.ok) {
+            setSherpaQuotesError(body.message || "Unable to retrieve Sherpa pricing. Try again.");
+            setSherpaQuotes(null);
+            return;
+          }
+
+          const quotes = body.quotes || [];
+          setSherpaQuotes(quotes);
+          setSherpaQuotesFetchedAt(new Date().toISOString());
+
+          const previous = sherpaSelectionRef.current;
+          const previousStillThere = previous.id != null && quotes.find(q => String(q.deliveryOptionId) === String(previous.id));
+
+          if (previousStillThere && !previous.auto) {
+            // A manual pick that's still valid — leave it exactly as chosen.
+            return;
+          }
+
+          const cheapest = quotes.find(q => q.recommended) || quotes[0] || null;
+          setSherpaStaleNotice(
+            previous.id != null && !previousStillThere && !previous.auto
+              ? "Your previous delivery option is no longer available. The cheapest available option has been selected."
+              : null
+          );
+          setSherpaSelection(cheapest ? cheapest.deliveryOptionId : null, true);
+        })
+        .catch(() => {
+          if (!cancelled) {
+            setSherpaQuotesError("Unable to retrieve Sherpa pricing. Try again.");
+            setSherpaQuotes(null);
+          }
+        })
+        .finally(() => {
+          if (!cancelled) setSherpaQuotesLoading(false);
+        });
+    }, 600);
+
+    return () => { cancelled = true; clearTimeout(timeout); };
+  }, [isSherpaScheduled, form.pickupAddress, form.dropoffAddress, form.scheduledDate, form.scheduledTime, form.packageNotes, sherpaRefreshToken]);
 
   function update(field, value) {
     setForm(f => ({ ...f, [field]: value }));
@@ -747,10 +993,16 @@ function NewDeliveryForm({ customers, onBookDelivery, onNavigate }) {
         errs.scheduledFor = "Choose a date and time to schedule for.";
       } else if (new Date(iso).getTime() <= Date.now()) {
         errs.scheduledFor = "Scheduled time must be in the future.";
+      } else if (isSherpaScheduled && !selectedSherpaOptionId) {
+        errs.scheduledFor = "Choose a Sherpa delivery speed before booking.";
       }
     }
     setErrors(errs);
     return Object.keys(errs).length === 0;
+  }
+
+  function handleSelectSherpaOption(quote) {
+    setSherpaSelection(quote.deliveryOptionId, false);
   }
 
   function scheduledForPayload() {
@@ -835,6 +1087,76 @@ function NewDeliveryForm({ customers, onBookDelivery, onNavigate }) {
       });
       setForm(emptyDeliveryForm());
       setQuote(null);
+      setErrors({});
+    } catch {
+      setApiError("Could not reach the delivery server. Please check it's running and try again.");
+    } finally {
+      setBookLoading(false);
+    }
+  }
+
+  // Books a scheduled Sherpa delivery for whichever speed is currently
+  // selected in SherpaDeliverySpeedPicker. Separate from handleBook() above
+  // because this flow has no generic `quote` object — quotes arrive
+  // automatically (see the requote effect), not from a manual "Get Quote"
+  // click. acceptPriceChange is only ever true when re-submitting after
+  // staff confirm the "Sherpa price changed" dialog (see the 409
+  // PRICE_CHANGED handling below).
+  async function handleBookSherpaScheduled(acceptPriceChange) {
+    if (!validate()) return;
+    const selected = (sherpaQuotes || []).find(q => String(q.deliveryOptionId) === String(selectedSherpaOptionId));
+    if (!selected) return;
+
+    setApiError(null);
+    setBookLoading(true);
+    try {
+      const response = await fetch(`${API_BASE}/deliveries`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          orderRef: form.orderRef.trim(),
+          customerName: form.customerName.trim(),
+          customerPhone: form.customerPhone.trim(),
+          customerId: form.selectedCustomerId,
+          pickupAddress: form.pickupAddress.trim(),
+          dropoffAddress: form.dropoffAddress.trim(),
+          packageNotes: form.packageNotes.trim(),
+          coldChain: form.coldChain,
+          specialInstructions: form.specialInstructions.trim(),
+          scheduledFor: scheduledForPayload(),
+          provider: "sherpa",
+          deliveryOptionId: selected.deliveryOptionId,
+          deliveryOptionName: selected.name,
+          quotedPrice: selected.price,
+          quotedAt: sherpaQuotesFetchedAt,
+          quoteSelectedAutomatically: sherpaAutoSelected,
+          acceptPriceChange: !!acceptPriceChange,
+        }),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        if (body.error === "PRICE_CHANGED") {
+          setSherpaPriceChange({ previousPrice: body.previousPrice, currentPrice: body.currentPrice });
+        } else if (body.error === "OPTION_NO_LONGER_AVAILABLE") {
+          setApiError(body.message);
+          setSherpaRefreshToken(t => t + 1);
+        } else {
+          setApiError(body.message || "Could not book this delivery right now, please try again.");
+        }
+        return;
+      }
+      const delivery = mapDeliveryRecord(body);
+      onBookDelivery(delivery, {
+        saveNewCustomer: !form.selectedCustomerId && form.saveCustomer,
+        newCustomerData: {
+          name: delivery.customerName,
+          phone: delivery.customerPhone,
+          address: delivery.dropoffAddress,
+          notes: "",
+        },
+      });
+      setForm(emptyDeliveryForm());
+      setSherpaPriceChange(null);
       setErrors({});
     } catch {
       setApiError("Could not reach the delivery server. Please check it's running and try again.");
@@ -1053,25 +1375,48 @@ function NewDeliveryForm({ customers, onBookDelivery, onNavigate }) {
                 />
               </div>
             )}
+            {isSherpaScheduled && (
+              <div className="mt-5">
+                <div className="text-sm font-bold text-slate-500 uppercase tracking-wide mb-1">Delivery speed</div>
+                <SherpaDeliverySpeedPicker
+                  loading={sherpaQuotesLoading}
+                  error={sherpaQuotesError}
+                  quotes={sherpaQuotes}
+                  selectedId={selectedSherpaOptionId}
+                  onSelect={handleSelectSherpaOption}
+                  staleNotice={sherpaStaleNotice}
+                  onRetry={() => setSherpaRefreshToken(t => t + 1)}
+                />
+              </div>
+            )}
           </Field>
 
-          <div className="pt-2">
-            <button
-              onClick={handleGetQuote}
-              disabled={quoteLoading || !selectedProvider}
-              title={!selectedProvider ? "Choose a delivery provider first" : undefined}
-              className={
-                "w-full sm:w-auto px-8 py-4 rounded-xl font-bold text-lg transition-colors " +
-                (quoteLoading || !selectedProvider ? "bg-slate-300 text-slate-500 cursor-not-allowed" : "bg-slate-900 text-white hover:bg-slate-800 active:bg-black")
-              }
-            >
-              {quoteLoading ? "Getting quote…" : "Get Quote"}
-            </button>
-          </div>
+          {!isSherpaScheduled && (
+            <div className="pt-2">
+              <button
+                onClick={handleGetQuote}
+                disabled={quoteLoading || !selectedProvider}
+                title={!selectedProvider ? "Choose a delivery provider first" : undefined}
+                className={
+                  "w-full sm:w-auto px-8 py-4 rounded-xl font-bold text-lg transition-colors " +
+                  (quoteLoading || !selectedProvider ? "bg-slate-300 text-slate-500 cursor-not-allowed" : "bg-slate-900 text-white hover:bg-slate-800 active:bg-black")
+                }
+              >
+                {quoteLoading ? "Getting quote…" : "Get Quote"}
+              </button>
+            </div>
+          )}
         </div>
 
         <div>
-          {quote ? (
+          {isSherpaScheduled ? (
+            <SherpaScheduledBookingCard
+              quotes={sherpaQuotes}
+              selectedId={selectedSherpaOptionId}
+              onBook={() => handleBookSherpaScheduled(false)}
+              bookLoading={bookLoading}
+            />
+          ) : quote ? (
             <QuoteCard quote={quote} onBook={handleBook} bookLoading={bookLoading} />
           ) : (
             <div className="bg-white rounded-2xl border border-dashed border-slate-300 p-6 text-center text-slate-400 sticky top-24">
@@ -1080,6 +1425,21 @@ function NewDeliveryForm({ customers, onBookDelivery, onNavigate }) {
           )}
         </div>
       </div>
+      {sherpaPriceChange && (
+        <ConfirmModal
+          title="Sherpa price changed"
+          message={
+            <React.Fragment>
+              <span className="block">Previous quote: {formatMoney(sherpaPriceChange.previousPrice, "AUD")}</span>
+              <span className="block">Current price: {formatMoney(sherpaPriceChange.currentPrice, "AUD")}</span>
+            </React.Fragment>
+          }
+          confirmLabel="Accept & Book"
+          cancelLabel="Cancel"
+          onCancel={() => setSherpaPriceChange(null)}
+          onConfirm={() => handleBookSherpaScheduled(true)}
+        />
+      )}
     </div>
   );
 }
@@ -1122,6 +1482,11 @@ function OngoingDeliveriesTable({ deliveries, onSelect }) {
                     </div>
                     <div className="flex items-center gap-1.5 mt-1">
                       <ProviderTag provider={d.provider} />
+                      {d.courierServiceName && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 whitespace-nowrap">
+                          {d.courierServiceName}
+                        </span>
+                      )}
                       <SourceTag source={d.source} />
                     </div>
                   </td>
@@ -1916,7 +2281,14 @@ function DeliveryHistoryTable({ deliveries, onSelect }) {
                       {d.orderRef}
                       {d.coldChain && <span className="text-xs font-bold text-cyan-700">❄</span>}
                     </div>
-                    <ProviderTag provider={d.provider} />
+                    <div className="flex items-center gap-1.5 mt-1">
+                      <ProviderTag provider={d.provider} />
+                      {d.courierServiceName && (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 whitespace-nowrap">
+                          {d.courierServiceName}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className="px-5 py-4 text-slate-700">{d.customerName}</td>
                   <td className="px-5 py-4 text-slate-500">{d.dropoffAddress}</td>
@@ -1990,10 +2362,87 @@ function CustomerFormModal({ initial, onSave, onCancel }) {
   );
 }
 
-function CustomersScreen({ customers, deliveries, onAdd, onUpdate, onDelete }) {
+// Shown after a CSV import finishes — how many rows came in, which ones
+// were skipped (missing name/phone) and which imported customers have an
+// address Google's Find Place From Text couldn't verify (still saved, just
+// flagged, since a bad address shouldn't block saving a valid name/phone).
+function ImportResultModal({ result, onClose }) {
+  const unverified = result.imported.filter(c => c.addressVerified === false);
+
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+      <div className="bg-white rounded-2xl shadow-xl max-w-lg w-full p-6 max-h-[90vh] overflow-y-auto">
+        <h3 className="text-lg font-bold text-slate-900 mb-1">Import Results</h3>
+        <p className="text-sm text-slate-500 mb-4">
+          Imported {result.imported.length} of {result.totalRows} row{result.totalRows === 1 ? "" : "s"}.
+        </p>
+
+        {unverified.length > 0 && (
+          <div className="mb-4">
+            <p className="text-sm font-semibold text-amber-700 mb-2">
+              {unverified.length} address{unverified.length === 1 ? "" : "es"} couldn't be verified with Google — please check:
+            </p>
+            <ul className="text-sm text-slate-600 space-y-1 list-disc list-inside">
+              {unverified.map(c => (
+                <li key={c.id}>{c.name} — {c.address || "(blank)"}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {result.skipped.length > 0 && (
+          <div className="mb-4">
+            <p className="text-sm font-semibold text-red-700 mb-2">
+              {result.skipped.length} row{result.skipped.length === 1 ? "" : "s"} skipped:
+            </p>
+            <ul className="text-sm text-slate-600 space-y-1 list-disc list-inside">
+              {result.skipped.map(s => (
+                <li key={s.row}>Row {s.row} ({s.name}): {s.reason}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <div className="mt-6 flex justify-end">
+          <button onClick={onClose} className="px-5 py-3 rounded-xl font-semibold text-white bg-blue-600 hover:bg-blue-700">
+            Done
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CustomersScreen({ customers, deliveries, onAdd, onUpdate, onDelete, onImport }) {
   const [search, setSearch] = useState("");
   const [modalState, setModalState] = useState(null);
   const [deletingId, setDeletingId] = useState(null);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const fileInputRef = useRef(null);
+
+  function handleImportClick() {
+    if (fileInputRef.current) fileInputRef.current.click();
+  }
+
+  // Read the file client-side and send its raw text to the backend (rather
+  // than a multipart upload) — the app has no file-upload middleware
+  // installed, and the CSV is tiny text, so posting it as a JSON string
+  // field is simplest.
+  function handleFileSelected(e) {
+    const file = e.target.files && e.target.files[0];
+    e.target.value = ""; // allow re-selecting the same file later
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async () => {
+      setImporting(true);
+      const result = await onImport(String(reader.result || ""));
+      setImporting(false);
+      if (result) setImportResult(result);
+    };
+    reader.readAsText(file);
+  }
 
   const deliveryCountByCustomer = useMemo(() => {
     const counts = {};
@@ -2026,12 +2475,28 @@ function CustomersScreen({ customers, deliveries, onAdd, onUpdate, onDelete }) {
     <div className="max-w-6xl mx-auto px-4 py-8">
       <div className="flex items-center justify-between flex-wrap gap-4 mb-6">
         <h1 className="text-2xl font-bold text-slate-900">Customers</h1>
-        <button
-          onClick={() => setModalState({ mode: "add" })}
-          className="px-5 py-3 rounded-xl font-bold bg-blue-600 text-white hover:bg-blue-700"
-        >
-          + Add Customer
-        </button>
+        <div className="flex gap-3">
+          <button
+            onClick={handleImportClick}
+            disabled={importing}
+            className="px-5 py-3 rounded-xl font-bold text-blue-700 bg-blue-50 hover:bg-blue-100 disabled:opacity-50"
+          >
+            {importing ? "Importing…" : "Import CSV"}
+          </button>
+          <input
+            type="file"
+            accept=".csv,text/csv"
+            ref={fileInputRef}
+            onChange={handleFileSelected}
+            className="hidden"
+          />
+          <button
+            onClick={() => setModalState({ mode: "add" })}
+            className="px-5 py-3 rounded-xl font-bold bg-blue-600 text-white hover:bg-blue-700"
+          >
+            + Add Customer
+          </button>
+        </div>
       </div>
 
       <div className="mb-6">
@@ -2111,6 +2576,10 @@ function CustomersScreen({ customers, deliveries, onAdd, onUpdate, onDelete }) {
           onCancel={() => setDeletingId(null)}
           onConfirm={() => { onDelete(deletingCustomer.id); setDeletingId(null); }}
         />
+      )}
+
+      {importResult && (
+        <ImportResultModal result={importResult} onClose={() => setImportResult(null)} />
       )}
     </div>
   );
@@ -2543,6 +3012,11 @@ function DeliveryDetail({ delivery, backLabel, onBack, onCancelDelivery, onAdvan
         <div className="flex items-center gap-3">
           <h1 className="text-2xl font-bold text-slate-900">Order {delivery.orderRef}</h1>
           <ProviderTag provider={delivery.provider} />
+          {delivery.courierServiceName && (
+            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-slate-100 text-slate-500 whitespace-nowrap">
+              {delivery.courierServiceName}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-2">
           {delivery.liveTracking && (
@@ -2885,6 +3359,36 @@ function App({ onLogout }) {
     }
   }
 
+  // csvText is the raw file contents, read client-side by CustomersScreen —
+  // parsing and Google address verification both happen server-side (see
+  // routes/customers.js's /import). Returns the parsed result body so
+  // CustomersScreen can show per-row detail (skipped rows, unverified
+  // addresses) in its own modal; the banner here is just the summary.
+  async function handleImportCustomers(csvText) {
+    try {
+      const response = await fetch(`${API_BASE}/customers/import`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ csv: csvText }),
+      });
+      const body = await parseJsonResponse(response);
+      if (!response.ok) {
+        setBanner(body.message || "Could not import customers right now.", "error");
+        return null;
+      }
+      setCustomers(prev => [...prev, ...body.imported]);
+      setBanner(
+        `Imported ${body.imported.length} of ${body.totalRows} customer${body.totalRows === 1 ? "" : "s"}` +
+          (body.skipped.length ? `, ${body.skipped.length} skipped.` : "."),
+        body.skipped.length ? "error" : "success"
+      );
+      return body;
+    } catch {
+      setBanner("Could not reach the delivery server. Please check it's running and try again.", "error");
+      return null;
+    }
+  }
+
   async function handleDeleteCustomer(id) {
     try {
       const response = await fetch(`${API_BASE}/customers/${id}`, { method: "DELETE" });
@@ -2945,6 +3449,7 @@ function App({ onLogout }) {
             onAdd={handleAddCustomer}
             onUpdate={handleUpdateCustomer}
             onDelete={handleDeleteCustomer}
+            onImport={handleImportCustomers}
           />
         )}
         {section === "reports" && <ReportsScreen deliveries={deliveries} />}

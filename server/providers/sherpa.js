@@ -208,6 +208,63 @@ function buildDeliveryInstructions(coldChain, specialInstructions) {
   return parts.length ? parts.join(" — ") : undefined;
 }
 
+// Delivery-option ids confirmed live against Sherpa's QA swagger doc
+// (qa.deliveries.sherpa.net.au/api/1/swagger_doc.json) on 2026-08-25 — this
+// is the enum both /quotes/delivery_options and POST /deliveries's
+// `delivery_option` field share. Kept as a lookup table rather than an
+// exhaustive switch so a future id Sherpa adds falls back to a generic
+// label instead of the app breaking or mislabeling it.
+const SHERPA_OPTION_LABELS = {
+  0: "2 Hours",
+  1: "4 Hours",
+  2: "Same Day",
+  3: "Flat Rate",
+  5: "ASAP",
+  6: "Bulk Rate",
+};
+
+function labelForOption(id) {
+  return SHERPA_OPTION_LABELS[id] || `Option ${id}`;
+}
+
+// getDeliveryOptions — quotes EVERY delivery speed Sherpa actually offers for
+// this pickup/dropoff/ready time, instead of getQuote()'s single fixed-vehicle
+// price. Confirmed live: POST /quotes/delivery_options returns
+// { delivery_options: [{ delivery_option, price }], currency, distance,
+// vehicle_id } — Sherpa only lists options it actually offers for this
+// request (no separate "available" flag), and the response carries NO name
+// or delivery-window field, hence labelForOption() above rather than
+// anything Sherpa hands back itself.
+async function getDeliveryOptions({ pickupAddress, dropoffAddress, readyAt, packageNotes }) {
+  const body = await sherpaRequest("/quotes/delivery_options", {
+    method: "POST",
+    body: {
+      vehicle_id: DEFAULT_VEHICLE_ID,
+      item_description: packageNotes || "Pharmacy order",
+      pickup_address: pickupAddress,
+      delivery_address: dropoffAddress,
+      ready_at: readyAt || undefined,
+    },
+  });
+
+  const currency = body.currency || "AUD";
+  const quotes = (body.delivery_options || [])
+    .map(o => ({
+      deliveryOptionId: o.delivery_option,
+      name: labelForOption(o.delivery_option),
+      price: parseFloat(o.price),
+      currency,
+    }))
+    // Defensive only — Sherpa's own schema documents `price` as always
+    // present on a returned option; this just guards against a malformed
+    // entry silently corrupting the cheapest-price comparison.
+    .filter(q => Number.isFinite(q.price))
+    .sort((a, b) => a.price - b.price)
+    .map((q, i) => ({ ...q, recommended: i === 0 }));
+
+  return { quotes };
+}
+
 async function getQuote({ pickupAddress, dropoffAddress, scheduledFor }) {
   const body = await sherpaRequest("/price_calculators/delivery", {
     method: "GET",
@@ -242,11 +299,18 @@ async function createDelivery({
   coldChain,
   specialInstructions,
   scheduledFor,
+  // Confirmed live (2026-08-25): POST /deliveries accepts `delivery_option`
+  // (same enum as /quotes/delivery_options) as a field distinct from
+  // vehicle_id, defaulting to 0 ("2 Hours") when omitted — which is exactly
+  // what every call site that doesn't pass this explicitly still gets, so
+  // leaving it out here is a no-op change for them, not a behavior change.
+  deliveryOptionId,
 }) {
   const body = await sherpaRequest("/deliveries", {
     method: "POST",
     body: {
       vehicle_id: DEFAULT_VEHICLE_ID,
+      delivery_option: deliveryOptionId != null ? deliveryOptionId : undefined,
       item_description: packageNotes || "Pharmacy order",
       internal_reference_id: orderRef,
       prescription_meds: true,
@@ -280,4 +344,4 @@ async function cancelDelivery(providerDeliveryId) {
   return getStatus(providerDeliveryId);
 }
 
-module.exports = { getQuote, createDelivery, getStatus, cancelDelivery };
+module.exports = { getQuote, getDeliveryOptions, createDelivery, getStatus, cancelDelivery };
